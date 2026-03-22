@@ -1,0 +1,39 @@
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  custom:
+    format: '[%(asctime)s -> %(levelname)s] - %(message)s'
+    datefmt: '%Y-%m-%d %H:%M:%S'
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    formatter: custom
+    level: INFO
+    stream: ext://sys.stdout
+
+loggers:
+  uvicorn:
+    handlers: [console]
+    level: INFO
+    propagate: false
+
+  uvicorn.error:
+    handlers: [console]
+    level: INFO
+    propagate: false
+
+  uvicorn.access:
+    handlers: [console]
+    level: INFO
+    propagate: false
+
+  app:
+    handlers: [console]
+    level: INFO
+    propagate: false
+
+root:
+  handlers: [console]
+  level: INFO

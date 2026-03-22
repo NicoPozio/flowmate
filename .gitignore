@@ -1,0 +1,30 @@
+# ==========================================
+# File di Configurazione e Segreti
+# ==========================================
+# Esclude tutti i file .env a qualsiasi livello di profondità
+**/.env
+**/.env.*
+# Permette il tracciamento dei file di template (es. .env.example)
+!**/.env.example
+
+# ==========================================
+# Dati Sensibili e Volumi Docker
+# ==========================================
+# Esclude i binari del database MariaDB
+mariadb/data/
+
+# ==========================================
+# Python e Ambienti Virtuali
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# ==========================================
+# File di Sistema Operativo
+# ==========================================
+.DS_Store
+Thumbs.db
