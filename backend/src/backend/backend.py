@@ -13,7 +13,8 @@ from endpoints.hobbies.hobbies import router as hobbies_router
 from endpoints.schedule.schedule import router as schedule_router
 from endpoints.biometrics.biometrics import router as biometrics_router
 from endpoints.activities.activities import router as activities_router
-
+from endpoints.beacons.beacons import router as beacons_router
+from endpoints.presence.presence import router as presence_router
 # Lettura delle variabili d'ambiente per la configurazione del database
 db_host = os.getenv("DB_HOST", "flowmate-db")
 db_port = int(os.getenv("DB_PORT", 3306))
@@ -64,3 +65,5 @@ app.include_router(hobbies_router)
 app.include_router(schedule_router)
 app.include_router(biometrics_router)
 app.include_router(activities_router)
+app.include_router(beacons_router)
+app.include_router(presence_router)
