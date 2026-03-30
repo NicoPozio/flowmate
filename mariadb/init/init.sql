@@ -78,15 +78,18 @@ CREATE TABLE chat_history (
     CONSTRAINT chk_role CHECK (sender_role IN ('user', 'assistant', 'system')),
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
--- Beacons Catalog (Registro Hardware)
+
+-- Beacons Catalog (Registro Hardware aggiornato!)
 CREATE TABLE beacons_catalog (
     beacon_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
+    user_id CHAR(36) NOT NULL,
     hardware_uuid VARCHAR(36) NOT NULL,
     major_id INT NOT NULL,
     minor_id INT NOT NULL,
     zone_name VARCHAR(100) NOT NULL,
     associated_hobby_id INT,
     UNIQUE (hardware_uuid, major_id, minor_id),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (associated_hobby_id) REFERENCES hobbies_catalog(hobby_id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
@@ -101,6 +104,7 @@ CREATE TABLE zone_presence_logs (
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (beacon_id) REFERENCES beacons_catalog(beacon_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
+
 -- Performance Optimization Indexes (B-Tree)
 CREATE INDEX idx_biometric_logs_user_time ON biometric_logs(user_id, log_timestamp DESC);
 CREATE INDEX idx_chat_history_user_time ON chat_history(user_id, message_timestamp DESC);
