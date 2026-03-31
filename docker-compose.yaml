@@ -5,7 +5,7 @@ services:
     ports:
       - "3307:3306"
     volumes:
-      - ./mariadb/data/:/var/lib/mysql:Z
+      - mariadb_data:/var/lib/mysql
     env_file:
       - mariadb/.env
 
@@ -21,3 +21,6 @@ services:
     depends_on: 
       mariadb:
         condition: service_healthy
+
+volumes:
+  mariadb_data:
