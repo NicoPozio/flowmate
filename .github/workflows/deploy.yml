@@ -38,6 +38,9 @@ jobs:
 
             mkdir -p mariadb
             cp .env mariadb/.env
+
+            mkdir -p backend
+            cp .env backend/.env
             
             # 4. Ricostruzione e avvio dei container Docker
             docker compose down
