@@ -1,4 +1,4 @@
-CREATE DATABASE IF NOT EXISTS flowmate_db;
+--CREATE DATABASE IF NOT EXISTS flowmate_db;
 USE flowmate_db;
 
 --DROP USER IF EXISTS 'user'@'%';
