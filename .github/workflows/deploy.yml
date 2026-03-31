@@ -35,6 +35,9 @@ jobs:
             echo "DB_NAME=flowmate_db" >> .env
             echo "DB_USER=$DB_USER" >> .env
             echo "DB_PASSWORD=$DB_PASSWORD" >> .env
+
+            mkdir -p mariadb
+            cp .env mariadb/.env
             
             # 4. Ricostruzione e avvio dei container Docker
             docker compose down
