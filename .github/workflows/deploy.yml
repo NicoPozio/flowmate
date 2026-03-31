@@ -23,7 +23,7 @@ jobs:
           envs: DB_USER, DB_PASSWORD
           script: |
             # 1. Navigazione nella directory del progetto precedentemente clonata
-            cd /root/flowmate-backend
+            cd /root/flowmate
             
             # 2. Aggiornamento del codice sorgente dal server GitHub
             git checkout main
