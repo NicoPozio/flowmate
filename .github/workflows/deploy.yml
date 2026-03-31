@@ -1,0 +1,41 @@
+name: Deploy to DigitalOcean Droplet
+
+# Si attiva ad ogni push sul branch principale
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Esecuzione deploy remoto via SSH
+        uses: appleboy/ssh-action@master
+        env:
+          # Passaggio dei segreti di GitHub all'ambiente di esecuzione dello script
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        with:
+          host: ${{ secrets.DROPLET_IP }}
+          username: ${{ secrets.DROPLET_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: DB_USER, DB_PASSWORD
+          script: |
+            # 1. Navigazione nella directory del progetto precedentemente clonata
+            cd /root/flowmate-backend
+            
+            # 2. Aggiornamento del codice sorgente dal server GitHub
+            git checkout main
+            git pull origin main
+            
+            # 3. Iniezione Dinamica del file .env di produzione
+            echo "DB_HOST=flowmate-db" > .env
+            echo "DB_PORT=3306" >> .env
+            echo "DB_NAME=flowmate_db" >> .env
+            echo "DB_USER=$DB_USER" >> .env
+            echo "DB_PASSWORD=$DB_PASSWORD" >> .env
+            
+            # 4. Ricostruzione e avvio dei container Docker
+            docker compose down
+            docker compose up -d --build
