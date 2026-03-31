@@ -1,11 +1,11 @@
 CREATE DATABASE IF NOT EXISTS flowmate_db;
 USE flowmate_db;
 
-DROP USER IF EXISTS 'user'@'%';
+--DROP USER IF EXISTS 'user'@'%';
 
-CREATE USER 'user'@'%' IDENTIFIED BY 'userpassword';
-GRANT ALL PRIVILEGES ON flowmate_db.* TO 'user'@'%' IDENTIFIED BY 'userpassword';
-FLUSH PRIVILEGES;
+--CREATE USER 'user'@'%' IDENTIFIED BY 'userpassword';
+--GRANT ALL PRIVILEGES ON flowmate_db.* TO 'user'@'%' IDENTIFIED BY 'userpassword';
+--FLUSH PRIVILEGES;
 
 -- Users Table
 CREATE TABLE users (
