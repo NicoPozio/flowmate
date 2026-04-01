@@ -13,3 +13,4 @@ class UserCreate(UserBase):
 class UserResponse(UserBase):
     user_id: str
     registration_date: datetime
+    has_hobbies: bool = False # <-- Indica se l'utente ha già scelto gli hobby
