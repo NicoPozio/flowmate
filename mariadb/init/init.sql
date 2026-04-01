@@ -8,11 +8,13 @@ USE flowmate_db;
 --FLUSH PRIVILEGES;
 
 -- Users Table
+-- Se stai ricreando la tabella da zero:
 CREATE TABLE users (
     user_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
     username VARCHAR(50) UNIQUE NOT NULL,
     weight_kg DECIMAL(5,2) NOT NULL,
     daily_kcal_goal INT NOT NULL,
+    daily_steps_goal INT NOT NULL DEFAULT 10000, -- Aggiunto questo
     registration_date DATETIME DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
@@ -47,13 +49,14 @@ CREATE TABLE silent_schedule (
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
--- Biometric Logs (Transactional)
+-- Biometric Logs (AGGIORNATA PER HEALTH CONNECT: Una riga per utente al giorno)
 CREATE TABLE biometric_logs (
-    log_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
     user_id CHAR(36),
-    log_timestamp DATETIME NOT NULL,
-    steps_recorded INT NOT NULL,
-    kcal_burned INT NOT NULL,
+    record_date DATE NOT NULL,
+    steps_recorded INT DEFAULT 0,
+    active_minutes INT DEFAULT 0,
+    kcal_burned INT DEFAULT 0,
+    PRIMARY KEY (user_id, record_date),
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
@@ -106,7 +109,7 @@ CREATE TABLE zone_presence_logs (
 ) ENGINE=InnoDB;
 
 -- Performance Optimization Indexes (B-Tree)
-CREATE INDEX idx_biometric_logs_user_time ON biometric_logs(user_id, log_timestamp DESC);
+CREATE INDEX idx_biometric_logs_user_time ON biometric_logs(user_id, record_date DESC);
 CREATE INDEX idx_chat_history_user_time ON chat_history(user_id, message_timestamp DESC);
 CREATE INDEX idx_schedule_user_day ON silent_schedule(user_id, day_of_week);
 
