@@ -61,12 +61,22 @@ CREATE TABLE biometric_logs (
 ) ENGINE=InnoDB;
 
 -- Completed Activities Log
-CREATE TABLE completed_activities (
-    activity_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
-    user_id CHAR(36),
-    hobby_id INT,
-    duration_minutes INT NOT NULL,
-    completion_timestamp DATETIME NOT NULL,
+-- Activity Suggestions Log (Replaces Completed Activities)
+-- Activity Suggestions Log (Replaces Completed Activities)
+CREATE TABLE activity_suggestions (
+    suggestion_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
+    user_id CHAR(36) NOT NULL,
+    hobby_id INT NOT NULL,
+    suggested_duration_minutes INT NOT NULL,
+    expected_kcal INT NOT NULL, 
+    
+    -- LA NUOVA COLONNA PER LO SNAPSHOT
+    baseline_active_minutes INT DEFAULT 0, 
+    
+    status VARCHAR(20) DEFAULT 'PROPOSED', 
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at DATETIME, 
+    
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (hobby_id) REFERENCES hobbies_catalog(hobby_id) ON DELETE RESTRICT
 ) ENGINE=InnoDB;
