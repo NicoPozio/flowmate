@@ -55,6 +55,24 @@ def generate_ai_suggestion(user_id: str, request: ChatRequest, conn: mariadb.Con
     if kcal_mancanti < 0:
         kcal_mancanti = 0
 
+    # =========================================================================
+    # NEW: FETCH TODAY'S ACTIVITY SUGGESTIONS
+    # =========================================================================
+    daily_activities_raw = execute_query(conn, """
+        SELECT a.status, a.suggested_duration_minutes, h.hobby_name
+        FROM activity_suggestions a
+        JOIN hobbies_catalog h ON a.hobby_id = h.hobby_id
+        WHERE a.user_id = ? AND DATE(a.created_at) = ?
+        ORDER BY a.created_at DESC
+    """, (user_id, today_str), dict=True)
+
+    activities_context = "Nessuna attività proposta oggi."
+    if daily_activities_raw:
+        activities_context = ""
+        for act in daily_activities_raw:
+            activities_context += f"- {act['hobby_name']} ({act['suggested_duration_minutes']} min): Stato -> {act['status']}\n"
+    # =========================================================================
+
     history_raw = execute_query(conn, """
         SELECT sender_role, message_content 
         FROM chat_history 
@@ -67,7 +85,7 @@ def generate_ai_suggestion(user_id: str, request: ChatRequest, conn: mariadb.Con
         role = "Utente" if msg['sender_role'] == 'user' else "FlowMate"
         chat_context += f"{role}: {msg['message_content']}\n"
 
-    # --- MODIFICA AL PROMPT: SPRONO PIÙ ATTIVO E CALORIE OBBLIGATORIE ---
+    # --- MODIFICA AL PROMPT: AGGIUNTO IL CONTROLLO SULLE ATTIVITÀ DI OGGI ---
     system_prompt = f"""
     Sei FlowMate, un assistente fitness empatico e amichevole.
     
@@ -77,25 +95,33 @@ def generate_ai_suggestion(user_id: str, request: ChatRequest, conn: mariadb.Con
     - Calorie Bruciate Oggi: {kcal_burned_today} kcal
     - CALORIE MANCANTI ALL'OBIETTIVO: {kcal_mancanti} kcal
     
+    STATO DELLE ATTIVITÀ DI OGGI:
+    {activities_context}
+    
     Hobby e Preferenze:
     {hobbies_list}
     
     Cronologia:
     {chat_context}
     
-    REGOLE DI CONVERSAZIONE:
-    1. SALUTI E CHIACCHIERE: Se l'utente dice "Ciao" o "Bene", fai conversazione MA concludi SEMPRE con uno sprono amichevole, ad esempio: "Che attività ti piacerebbe fare adesso per avvicinarti al tuo obiettivo?". NON inserire l'hobby_id in questa fase.
-    2. QUANDO PROPORRE: Fai una proposta ufficiale (impostando un hobby_id valido) se l'utente chiede un consiglio o risponde positivamente al tuo sprono.
-    3. REGOLA DELLE CALORIE (FONDAMENTALE): Ogni volta che fai una proposta ufficiale, DEVI scrivere esplicitamente nel messaggio testuale quante calorie brucerà (es. "Ti propongo una passeggiata di 30 minuti, brucerai circa 150 kcal!").
-    4. DOPO UN'ACCETTAZIONE O RIFIUTO: Fai il tifo per lui o rassicuralo, poi FERMATI. Non fare altre proposte.
-    5. CALCOLO CALORIE MANCANTI: Se chiede quante ne mancano, rispondi con l'esatto numero indicato nei dati in tempo reale ({kcal_mancanti} kcal).
+    REGOLE DI CONVERSAZIONE E GESTIONE ATTIVITÀ:
+    1. CONTROLLO STATUS: Controlla sempre lo "STATO DELLE ATTIVITÀ DI OGGI" prima di rispondere.
+       - Se l'utente ha un'attività in stato "PROPOSED": NON FARE NUOVE PROPOSTE (restituisci hobby_id: null). Chiedigli se ha intenzione di accettare o rifiutare l'attività che gli hai appena suggerito.
+       - Se l'utente ha un'attività in stato "ACCEPTED": Ricordagli in modo incoraggiante che ha quell'attività in sospeso. 
+         TUTTAVIA, se l'utente dice chiaramente che non vuole più farla, che ha cambiato idea o chiede esplicitamente un'altra proposta, 
+         ALLORA puoi proporre un nuovo hobby (impostando hobby_id, duration e kcal).
+       -Se l'utente ha un'attività in stato "COMPLETED": Fagli molti complimenti! ATTENZIONE: le "Calorie Bruciate Oggi" indicano il totale della giornata, NON quelle della singola attività. Specifica sempre usando frasi come "Fino ad ora hai bruciato un totale di {kcal_burned_today} kcal oggi". Proponi un'altra attività solo se gli mancano ancora calorie per raggiungere l'obiettivo.
+    2. SALUTI E CHIACCHIERE: Se l'utente dice "Ciao" o "Bene", fai conversazione MA concludi SEMPRE con uno sprono amichevole. NON inserire l'hobby_id in questa fase.
+    3. QUANDO PROPORRE: Fai una proposta ufficiale (impostando un hobby_id valido) solo se non ci sono attività "ACCEPTED" in sospeso e se l'utente è pronto ad allenarsi.
+    4. REGOLA DELLE CALORIE (FONDAMENTALE): Ogni volta che fai una proposta ufficiale, DEVI scrivere esplicitamente nel messaggio testuale quante calorie brucerà (es. "Ti propongo una passeggiata di 30 minuti, brucerai circa 150 kcal!").
+    5. DOPO UN'ACCETTAZIONE O RIFIUTO: Fai il tifo per lui o rassicuralo, poi FERMATI. Non fare altre proposte immediate.
     
     RITORNA SEMPRE E SOLO QUESTO JSON:
     {{
         "text": "il tuo messaggio",
-        "hobby_id": ID_DELL_HOBBY (inserisci null se stai solo chiacchierando),
-        "duration": MINUTI (inserisci null se non fai proposte),
-        "kcal": CALORIE_STIMATE (inserisci null se non fai proposte),
+        "hobby_id": ID_DELL_HOBBY (inserisci null se stai solo chiacchierando o ricordando un'attività in sospeso),
+        "duration": MINUTI (inserisci null se non fai nuove proposte),
+        "kcal": CALORIE_STIMATE (inserisci null se non fai nuove proposte),
         "is_off_topic": false
     }}
     """
@@ -118,6 +144,16 @@ def generate_ai_suggestion(user_id: str, request: ChatRequest, conn: mariadb.Con
     suggestion_id = None
 
     if not ai_data.get("is_off_topic", False) and ai_data.get("hobby_id") is not None:
+        # --- NOVITÀ: PULIZIA DATABASE ---
+        # Prima di inserire la nuova proposta, mettiamo in REJECTED tutto quello 
+        # che era PROPOSED o ACCEPTED per oggi, così non abbiamo conflitti.
+        execute_query(conn, """
+            UPDATE activity_suggestions 
+            SET status = 'REJECTED' 
+            WHERE user_id = ? AND status IN ('PROPOSED', 'ACCEPTED') AND DATE(created_at) = ?
+        """, (user_id, today_str), fetch=False)
+
+        # Ora inseriamo la nuova proposta come prima
         suggestion_id = str(uuid.uuid4())
         execute_query(conn, """
             INSERT INTO activity_suggestions (suggestion_id, user_id, hobby_id, suggested_duration_minutes, expected_kcal, status)
