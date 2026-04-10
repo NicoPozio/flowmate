@@ -18,6 +18,8 @@ services:
       - "8003:8003"
     env_file:
       - backend/.env
+    volumes:
+      - ./backend/firebase-adminsdk.json:/app/firebase-adminsdk.json:ro
     depends_on: 
       mariadb:
         condition: service_healthy

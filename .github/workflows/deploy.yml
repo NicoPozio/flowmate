@@ -1,6 +1,5 @@
 name: Deploy to DigitalOcean Droplet
 
-# Si attiva ad ogni push sul branch principale
 on:
   push:
     branches:
@@ -17,12 +16,14 @@ jobs:
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FIREBASE_JSON: ${{ secrets.FIREBASE_JSON }}
         with:
           host: ${{ secrets.DROPLET_IP }}
           username: ${{ secrets.DROPLET_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           # ESPORTAZIONE: Rendiamo le variabili disponibili nello script Bash sotto
-          envs: DB_USER, DB_PASSWORD, DB_ROOT_PASSWORD
+          envs: DB_USER, DB_PASSWORD, DB_ROOT_PASSWORD, GEMINI_API_KEY, FIREBASE_JSON
           script: |
             # 1. Navigazione nella directory del progetto
             cd /root/flowmate
@@ -31,23 +32,26 @@ jobs:
             git checkout main
             git pull origin main
             
-            # 3. Iniezione variabili per il Backend
+            # 3. Iniezione variabili per il Backend (Database + Servizi Esterni)
             mkdir -p backend
             echo "DB_HOST=flowmate-db" > backend/.env
             echo "DB_PORT=3306" >> backend/.env
             echo "DB_NAME=flowmate_db" >> backend/.env
             echo "DB_USER=$DB_USER" >> backend/.env
             echo "DB_PASSWORD=$DB_PASSWORD" >> backend/.env
+            echo "GEMINI_API_KEY=$GEMINI_API_KEY" >> backend/.env
+            echo "FIREBASE_CREDENTIALS_PATH=/app/firebase-adminsdk.json" >> backend/.env
             
-            # 4. Iniezione variabili per MariaDB (Parametri nativi MARIADB_*)
+            # 4. Creazione dinamica del file JSON di Firebase da stringa multilinea
+            echo "$FIREBASE_JSON" > backend/firebase-adminsdk.json
+            
+            # 5. Iniezione variabili per MariaDB (Parametri nativi MARIADB_*)
             mkdir -p mariadb
             echo "MARIADB_ROOT_PASSWORD=$DB_ROOT_PASSWORD" > mariadb/.env
             echo "MARIADB_DATABASE=flowmate_db" >> mariadb/.env
             echo "MARIADB_USER=$DB_USER" >> mariadb/.env
             echo "MARIADB_PASSWORD=$DB_PASSWORD" >> mariadb/.env
             
-            # 5. Orchestrazione Docker
-            # down -v: Rimuove i container e i volumi esistenti per una pulizia profonda
-            # up -d --build: Ricostruisce le immagini e avvia in background
+            # 6. Orchestrazione Docker
             docker compose down -v
             docker compose up -d --build

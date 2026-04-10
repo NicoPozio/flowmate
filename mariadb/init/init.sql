@@ -1,22 +1,27 @@
---CREATE DATABASE IF NOT EXISTS flowmate_db;
+-- ==============================================================================
+-- INIZIALIZZAZIONE AMBIENTE
+-- ==============================================================================
+DROP DATABASE IF EXISTS flowmate_db;
+CREATE DATABASE flowmate_db;
 USE flowmate_db;
 
---DROP USER IF EXISTS 'user'@'%';
-
---CREATE USER 'user'@'%' IDENTIFIED BY 'userpassword';
---GRANT ALL PRIVILEGES ON flowmate_db.* TO 'user'@'%' IDENTIFIED BY 'userpassword';
---FLUSH PRIVILEGES;
+-- ==============================================================================
+-- TABELLE CORE UTENTE
+-- ==============================================================================
 
 -- Users Table
--- Se stai ricreando la tabella da zero:
 CREATE TABLE users (
     user_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
     username VARCHAR(50) UNIQUE NOT NULL,
     weight_kg DECIMAL(5,2) NOT NULL,
     daily_kcal_goal INT NOT NULL,
-    daily_steps_goal INT NOT NULL DEFAULT 10000, -- Aggiunto questo
+    daily_steps_goal INT NOT NULL DEFAULT 10000,
     registration_date DATETIME DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
+
+-- ==============================================================================
+-- CATALOGHI E DIZIONARI
+-- ==============================================================================
 
 -- Hobbies Catalog (Static Dictionary)
 CREATE TABLE hobbies_catalog (
@@ -36,6 +41,10 @@ CREATE TABLE user_hobbies (
     FOREIGN KEY (hobby_id) REFERENCES hobbies_catalog(hobby_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+-- ==============================================================================
+-- CONTESTO TEMPORALE E BIOMETRICO
+-- ==============================================================================
+
 -- Silent Schedule (Availability Matrix)
 CREATE TABLE silent_schedule (
     event_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
@@ -49,7 +58,7 @@ CREATE TABLE silent_schedule (
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
--- Biometric Logs (AGGIORNATA PER HEALTH CONNECT: Una riga per utente al giorno)
+-- Biometric Logs (Una riga per utente al giorno - Sincronizzato con Health Connect)
 CREATE TABLE biometric_logs (
     user_id CHAR(36),
     record_date DATE NOT NULL,
@@ -60,39 +69,11 @@ CREATE TABLE biometric_logs (
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
--- Completed Activities Log
--- Activity Suggestions Log (Replaces Completed Activities)
--- Activity Suggestions Log (Replaces Completed Activities)
-CREATE TABLE activity_suggestions (
-    suggestion_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
-    user_id CHAR(36) NOT NULL,
-    hobby_id INT NOT NULL,
-    suggested_duration_minutes INT NOT NULL,
-    expected_kcal INT NOT NULL, 
-    
-    -- LA NUOVA COLONNA PER LO SNAPSHOT
-    baseline_active_minutes INT DEFAULT 0, 
-    
-    status VARCHAR(20) DEFAULT 'PROPOSED', 
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    completed_at DATETIME, 
-    
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-    FOREIGN KEY (hobby_id) REFERENCES hobbies_catalog(hobby_id) ON DELETE RESTRICT
-) ENGINE=InnoDB;
+-- ==============================================================================
+-- INFRASTRUTTURA HARDWARE (BEACONS E RATE LIMITING)
+-- ==============================================================================
 
--- Chat History (Conversational Memory)
-CREATE TABLE chat_history (
-    message_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
-    user_id CHAR(36),
-    sender_role VARCHAR(20),
-    message_content TEXT NOT NULL,
-    message_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_role CHECK (sender_role IN ('user', 'assistant', 'system')),
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
-
--- Beacons Catalog (Registro Hardware aggiornato!)
+-- Beacons Catalog (Registro Hardware con Macchina a Stati Integrata)
 CREATE TABLE beacons_catalog (
     beacon_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
     user_id CHAR(36) NOT NULL,
@@ -101,6 +82,7 @@ CREATE TABLE beacons_catalog (
     minor_id INT NOT NULL,
     zone_name VARCHAR(100) NOT NULL,
     associated_hobby_id INT,
+    allow_notifications BOOLEAN DEFAULT FALSE,
     UNIQUE (hardware_uuid, major_id, minor_id),
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (associated_hobby_id) REFERENCES hobbies_catalog(hobby_id) ON DELETE SET NULL
@@ -118,10 +100,55 @@ CREATE TABLE zone_presence_logs (
     FOREIGN KEY (beacon_id) REFERENCES beacons_catalog(beacon_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+-- Sent Notifications (Rate Limiting per evitare Spam)
+CREATE TABLE sent_notifications (
+    notification_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
+    user_id CHAR(36) NOT NULL,
+    beacon_id CHAR(36) NOT NULL,
+    sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (beacon_id) REFERENCES beacons_catalog(beacon_id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- ==============================================================================
+-- LOGICA FUNZIONALE E STORICO
+-- ==============================================================================
+
+-- Activity Suggestions Log (Tracciamento ciclo di vita raccomandazioni)
+CREATE TABLE activity_suggestions (
+    suggestion_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
+    user_id CHAR(36) NOT NULL,
+    hobby_id INT NOT NULL,
+    suggested_duration_minutes INT NOT NULL,
+    expected_kcal INT NOT NULL, 
+    baseline_active_minutes INT DEFAULT 0, 
+    status VARCHAR(20) DEFAULT 'PROPOSED', 
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at DATETIME, 
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (hobby_id) REFERENCES hobbies_catalog(hobby_id) ON DELETE RESTRICT
+) ENGINE=InnoDB;
+
+-- Chat History (Memoria per LLM Groq)
+CREATE TABLE chat_history (
+    message_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
+    user_id CHAR(36),
+    sender_role VARCHAR(20),
+    message_content TEXT NOT NULL,
+    message_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_role CHECK (sender_role IN ('user', 'assistant', 'system')),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- ==============================================================================
+-- OTTIMIZZAZIONE E SEED DATA
+-- ==============================================================================
+
 -- Performance Optimization Indexes (B-Tree)
 CREATE INDEX idx_biometric_logs_user_time ON biometric_logs(user_id, record_date DESC);
 CREATE INDEX idx_chat_history_user_time ON chat_history(user_id, message_timestamp DESC);
 CREATE INDEX idx_schedule_user_day ON silent_schedule(user_id, day_of_week);
+CREATE INDEX idx_sent_notifications_time ON sent_notifications(user_id, beacon_id, sent_at DESC);
 
 -- Seed Data Initialization
 INSERT INTO hobbies_catalog (hobby_name, met_value) VALUES
@@ -130,3 +157,66 @@ INSERT INTO hobbies_catalog (hobby_name, met_value) VALUES
 ('Running', 10.0),
 ('Gaming', 1.5),
 ('Reading', 1.3);
+
+
+-- ==============================================================================
+-- MACCHINA A STATI FINITI (STORED PROCEDURE)
+-- ==============================================================================
+
+DELIMITER //
+
+CREATE PROCEDURE EvaluateProactiveState(
+    IN p_user_id CHAR(36),
+    IN p_beacon_id CHAR(36),
+    OUT p_action_state VARCHAR(50)
+)
+BEGIN
+    DECLARE v_allow_notifications BOOLEAN DEFAULT FALSE;
+    DECLARE v_recent_spam_count INT DEFAULT 0;
+    DECLARE v_is_free_time INT DEFAULT 0;
+    DECLARE v_kcal_goal INT DEFAULT 0;
+    DECLARE v_kcal_burned INT DEFAULT 0;
+    
+    DECLARE v_current_day INT;
+    DECLARE v_current_time TIME;
+
+    SET v_current_day = WEEKDAY(CURRENT_DATE());
+    SET v_current_time = CURRENT_TIME();
+
+    SELECT allow_notifications INTO v_allow_notifications 
+    FROM beacons_catalog 
+    WHERE beacon_id = p_beacon_id AND user_id = p_user_id;
+
+    SELECT COUNT(*) INTO v_recent_spam_count 
+    FROM sent_notifications 
+    WHERE user_id = p_user_id AND beacon_id = p_beacon_id AND sent_at >= NOW() - INTERVAL 1 HOUR;
+
+    SELECT COUNT(*) INTO v_is_free_time 
+    FROM silent_schedule 
+    WHERE user_id = p_user_id 
+      AND day_of_week = v_current_day 
+      AND start_time <= v_current_time 
+      AND end_time >= v_current_time
+      AND event_type = 'Free Time';
+
+    SELECT daily_kcal_goal INTO v_kcal_goal FROM users WHERE user_id = p_user_id;
+    
+    SELECT IFNULL(kcal_burned, 0) INTO v_kcal_burned 
+    FROM biometric_logs 
+    WHERE user_id = p_user_id AND record_date = CURRENT_DATE();
+
+    IF v_allow_notifications = FALSE THEN
+        SET p_action_state = 'SILENT_DND_ZONE';
+    ELSEIF v_recent_spam_count > 0 THEN
+        SET p_action_state = 'SILENT_RATE_LIMITED';
+    ELSEIF v_is_free_time = 0 THEN
+        SET p_action_state = 'SILENT_BUSY_SCHEDULE';
+    ELSEIF v_kcal_burned < v_kcal_goal THEN
+        SET p_action_state = 'TRIGGER_FITNESS';
+    ELSE
+        SET p_action_state = 'TRIGGER_HOBBY';
+    END IF;
+
+END //
+
+DELIMITER ;

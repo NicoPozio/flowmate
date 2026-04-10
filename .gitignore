@@ -7,6 +7,14 @@
 # Permette il tracciamento dei file di template (es. .env.example)
 !**/.env.example
 
+# Esclude le chiavi private di Firebase e Google Cloud
+firebase-adminsdk.json
+**/firebase-adminsdk.json
+*.json
+
+# Nota: Se hai altri file JSON non sensibili che vuoi tracciare (es. package.json), 
+# rimuovi la riga *.json qui sopra e lascia solo le due righe specifiche per firebase.
+
 # ==========================================
 # Dati Sensibili e Volumi Docker
 # ==========================================
