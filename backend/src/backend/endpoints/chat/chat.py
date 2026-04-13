@@ -2,7 +2,7 @@ import os
 import json
 import uuid
 import logging
-from datetime import date
+from datetime import date, datetime
 import google.generativeai as genai
 from fastapi import APIRouter, Depends, HTTPException, status
 import mariadb
@@ -85,7 +85,7 @@ def generate_ai_suggestion(user_id: str, request: ChatRequest, conn: mariadb.Con
         role = "Utente" if msg['sender_role'] == 'user' else "FlowMate"
         chat_context += f"{role}: {msg['message_content']}\n"
 
-    # --- MODIFICA AL PROMPT: AGGIUNTO IL CONTROLLO SULLE ATTIVITÀ DI OGGI ---
+    # --- MODIFICA AL PROMPT: POTENZIATO CON DIVIETO DI RIPETIZIONE ---
     system_prompt = f"""
     Sei FlowMate, un assistente fitness empatico e amichevole.
     
@@ -115,6 +115,7 @@ def generate_ai_suggestion(user_id: str, request: ChatRequest, conn: mariadb.Con
     3. QUANDO PROPORRE: Fai una proposta ufficiale (impostando un hobby_id valido) solo se non ci sono attività "ACCEPTED" in sospeso e se l'utente è pronto ad allenarsi.
     4. REGOLA DELLE CALORIE (FONDAMENTALE): Ogni volta che fai una proposta ufficiale, DEVI scrivere esplicitamente nel messaggio testuale quante calorie brucerà (es. "Ti propongo una passeggiata di 30 minuti, brucerai circa 150 kcal!").
     5. DOPO UN'ACCETTAZIONE O RIFIUTO: Fai il tifo per lui o rassicuralo, poi FERMATI. Non fare altre proposte immediate.
+    6.OVERACHIEVER: Se l'utente ha superato le calorie giornaliere (calorie mancanti = 0) ma vuole comunque allenarsi, assecondalo! Proponi un'attività leggera o il suo hobby preferito per puro divertimento, senza ripetergli che ha già raggiunto l'obiettivo.
     
     RITORNA SEMPRE E SOLO QUESTO JSON:
     {{
@@ -144,7 +145,6 @@ def generate_ai_suggestion(user_id: str, request: ChatRequest, conn: mariadb.Con
     suggestion_id = None
 
     if not ai_data.get("is_off_topic", False) and ai_data.get("hobby_id") is not None:
-        # --- NOVITÀ: PULIZIA DATABASE ---
         # Prima di inserire la nuova proposta, mettiamo in REJECTED tutto quello 
         # che era PROPOSED o ACCEPTED per oggi, così non abbiamo conflitti.
         execute_query(conn, """
@@ -153,7 +153,6 @@ def generate_ai_suggestion(user_id: str, request: ChatRequest, conn: mariadb.Con
             WHERE user_id = ? AND status IN ('PROPOSED', 'ACCEPTED') AND DATE(created_at) = ?
         """, (user_id, today_str), fetch=False)
 
-        # Ora inseriamo la nuova proposta come prima
         suggestion_id = str(uuid.uuid4())
         execute_query(conn, """
             INSERT INTO activity_suggestions (suggestion_id, user_id, hobby_id, suggested_duration_minutes, expected_kcal, status)
@@ -167,11 +166,13 @@ def generate_ai_suggestion(user_id: str, request: ChatRequest, conn: mariadb.Con
 
     return ChatResponse(message_id=str(uuid.uuid4()), text=ai_data.get('text', ""), suggestion_id=suggestion_id, options=[Option(**opt) for opt in options])
 
+# =====================================================================
+# 2. ENDPOINT ACCETTAZIONE
+# =====================================================================
 @router.post("/suggestions/{suggestion_id}/accept")
 def accept_suggestion(user_id: str, suggestion_id: str, conn: mariadb.Connection = Depends(db_connection)):
     today_str = date.today().isoformat()
     
-    # 1. Trova i minuti attivi attuali dell'utente
     current_logs = execute_query(conn, """
         SELECT SUM(active_minutes) as current_active 
         FROM biometric_logs 
@@ -180,7 +181,6 @@ def accept_suggestion(user_id: str, suggestion_id: str, conn: mariadb.Connection
     
     baseline_minutes = current_logs['current_active'] if current_logs and current_logs['current_active'] is not None else 0
 
-    # 2. Aggiorna lo stato in ACCEPTED e salva la fotografia iniziale (baseline)
     execute_query(conn, """
         UPDATE activity_suggestions 
         SET status = 'ACCEPTED', baseline_active_minutes = ?
@@ -189,8 +189,70 @@ def accept_suggestion(user_id: str, suggestion_id: str, conn: mariadb.Connection
     
     return {"status": "success", "message": "Attività accettata, snapshot registrato."}
 
-# --- NUOVO ENDPOINT: AGGIORNA STATO IN "REJECTED" ---
+# =====================================================================
+# 3. ENDPOINT RIFIUTO
+# =====================================================================
 @router.post("/suggestions/{suggestion_id}/reject")
 def reject_suggestion(user_id: str, suggestion_id: str, conn: mariadb.Connection = Depends(db_connection)):
     execute_query(conn, "UPDATE activity_suggestions SET status = 'REJECTED' WHERE suggestion_id = ? AND user_id = ?", (suggestion_id, user_id), fetch=False)
     return {"status": "success", "message": "Attività rifiutata"}
+
+# =====================================================================
+# 4. ENDPOINT STORICO E PROMEMORIA (NUOVO)
+# =====================================================================
+@router.get("/history")
+def get_chat_history(user_id: str, conn: mariadb.Connection = Depends(db_connection)):
+    # 1. Recupera gli ultimi 20 messaggi dal database in ordine cronologico
+    history_raw = execute_query(conn, """
+        SELECT sender_role, message_content, message_timestamp 
+        FROM chat_history 
+        WHERE user_id = ? 
+        ORDER BY message_timestamp ASC LIMIT 20
+    """, (user_id,), dict=True)
+
+    # 2. Cerca l'attività in sospeso RECUPERANDO ANCHE Kcal, Durata e Nome Hobby
+    today_str = date.today().isoformat()
+    pending_act = execute_query(conn, """
+        SELECT a.suggestion_id, a.suggested_duration_minutes, a.expected_kcal, h.hobby_name 
+        FROM activity_suggestions a
+        JOIN hobbies_catalog h ON a.hobby_id = h.hobby_id
+        WHERE a.user_id = ? AND a.status = 'PROPOSED' AND DATE(a.created_at) = ?
+        ORDER BY a.created_at DESC LIMIT 1
+    """, (user_id, today_str), fetchone=True, dict=True)
+
+    messages = []
+    
+    # Costruisci la cronologia base
+    if history_raw:
+        for msg in history_raw:
+            is_assistant = msg['sender_role'] == 'assistant'
+            time_str = msg['message_timestamp'].strftime("%H:%M") if hasattr(msg['message_timestamp'], 'strftime') else "00:00"
+            
+            messages.append({
+                "text": msg['message_content'],
+                "sender": "ai" if is_assistant else "user",
+                "timestamp": time_str
+            })
+
+    # 3. LA MAGIA: Se c'è un'attività in sospeso, iniettiamo il Promemoria alla fine!
+    if pending_act:
+        now_str = datetime.now().strftime("%H:%M")
+        
+        testo_promemoria = (
+            f"📌 Promemoria: Ti avevo proposto {pending_act['suggested_duration_minutes']} minuti "
+            f"di {pending_act['hobby_name']} per bruciare circa {pending_act['expected_kcal']} kcal.\n\n"
+            f"Che facciamo, iniziamo?"
+        )
+        
+        messages.append({
+            "text": testo_promemoria,
+            "sender": "ai",
+            "timestamp": now_str,
+            "suggestion_id": pending_act['suggestion_id'],
+            "options": [
+                {"action": "ACCEPT", "label": "✅ Accetta"},
+                {"action": "REJECT", "label": "❌ No grazie"}
+            ]
+        })
+
+    return {"messages": messages}

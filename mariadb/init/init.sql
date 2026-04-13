@@ -83,7 +83,7 @@ CREATE TABLE beacons_catalog (
     zone_name VARCHAR(100) NOT NULL,
     associated_hobby_id INT,
     allow_notifications BOOLEAN DEFAULT FALSE,
-    UNIQUE (hardware_uuid, major_id, minor_id),
+    UNIQUE (user_id, hardware_uuid, major_id, minor_id),
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (associated_hobby_id) REFERENCES hobbies_catalog(hobby_id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
@@ -129,7 +129,7 @@ CREATE TABLE activity_suggestions (
     FOREIGN KEY (hobby_id) REFERENCES hobbies_catalog(hobby_id) ON DELETE RESTRICT
 ) ENGINE=InnoDB;
 
--- Chat History (Memoria per LLM Groq)
+-- Chat History (Memoria per LLM)
 CREATE TABLE chat_history (
     message_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
     user_id CHAR(36),
@@ -149,6 +149,7 @@ CREATE INDEX idx_biometric_logs_user_time ON biometric_logs(user_id, record_date
 CREATE INDEX idx_chat_history_user_time ON chat_history(user_id, message_timestamp DESC);
 CREATE INDEX idx_schedule_user_day ON silent_schedule(user_id, day_of_week);
 CREATE INDEX idx_sent_notifications_time ON sent_notifications(user_id, beacon_id, sent_at DESC);
+CREATE INDEX idx_suggestions_user_status ON activity_suggestions(user_id, status);
 
 -- Seed Data Initialization
 INSERT INTO hobbies_catalog (hobby_name, met_value) VALUES
@@ -160,7 +161,7 @@ INSERT INTO hobbies_catalog (hobby_name, met_value) VALUES
 
 
 -- ==============================================================================
--- MACCHINA A STATI FINITI (STORED PROCEDURE)
+-- MACCHINA A STATI FINITI (STORED PROCEDURE AGGIORNATA)
 -- ==============================================================================
 
 DELIMITER //
@@ -173,6 +174,7 @@ CREATE PROCEDURE EvaluateProactiveState(
 BEGIN
     DECLARE v_allow_notifications BOOLEAN DEFAULT FALSE;
     DECLARE v_recent_spam_count INT DEFAULT 0;
+    DECLARE v_pending_proposals INT DEFAULT 0;
     DECLARE v_is_free_time INT DEFAULT 0;
     DECLARE v_kcal_goal INT DEFAULT 0;
     DECLARE v_kcal_burned INT DEFAULT 0;
@@ -183,14 +185,24 @@ BEGIN
     SET v_current_day = WEEKDAY(CURRENT_DATE());
     SET v_current_time = CURRENT_TIME();
 
+    -- 1. Controllo se la zona del beacon permette notifiche
     SELECT allow_notifications INTO v_allow_notifications 
     FROM beacons_catalog 
     WHERE beacon_id = p_beacon_id AND user_id = p_user_id;
 
+    -- 2. Controllo Rate Limiting (Spam): max 1 notifica per ora per questo beacon
     SELECT COUNT(*) INTO v_recent_spam_count 
     FROM sent_notifications 
     WHERE user_id = p_user_id AND beacon_id = p_beacon_id AND sent_at >= NOW() - INTERVAL 1 HOUR;
 
+    -- 3. Controllo Proposte Pendenti: se c'è già un PROPOSED attivo oggi, non disturbare
+    SELECT COUNT(*) INTO v_pending_proposals 
+    FROM activity_suggestions 
+    WHERE user_id = p_user_id 
+      AND status = 'PROPOSED' 
+      AND DATE(created_at) = CURRENT_DATE();
+
+    -- 4. Controllo Calendario: l'utente deve essere in un blocco "Free Time"
     SELECT COUNT(*) INTO v_is_free_time 
     FROM silent_schedule 
     WHERE user_id = p_user_id 
@@ -199,16 +211,22 @@ BEGIN
       AND end_time >= v_current_time
       AND event_type = 'Free Time';
 
+    -- 5. Recupero obiettivi e progresso odierno
     SELECT daily_kcal_goal INTO v_kcal_goal FROM users WHERE user_id = p_user_id;
     
     SELECT IFNULL(kcal_burned, 0) INTO v_kcal_burned 
     FROM biometric_logs 
     WHERE user_id = p_user_id AND record_date = CURRENT_DATE();
 
+    -- ==========================================================================
+    -- LOGICA DI USCITA (GERARCHIA)
+    -- ==========================================================================
     IF v_allow_notifications = FALSE THEN
         SET p_action_state = 'SILENT_DND_ZONE';
     ELSEIF v_recent_spam_count > 0 THEN
         SET p_action_state = 'SILENT_RATE_LIMITED';
+    ELSEIF v_pending_proposals > 0 THEN
+        SET p_action_state = 'SILENT_PROPOSAL_PENDING';
     ELSEIF v_is_free_time = 0 THEN
         SET p_action_state = 'SILENT_BUSY_SCHEDULE';
     ELSEIF v_kcal_burned < v_kcal_goal THEN

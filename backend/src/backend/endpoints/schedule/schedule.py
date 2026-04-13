@@ -1,4 +1,5 @@
 import uuid
+import datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 import mariadb
 
@@ -7,6 +8,16 @@ from endpoints.schedule.models import ScheduleCreate, ScheduleResponse
 
 router = APIRouter(prefix="/users/{user_id}/schedule", tags=["Schedule"])
 
+# --- FUNZIONE DI SUPPORTO ---
+# Trasforma i "secondi" di MariaDB in un orario leggibile per l'app Android
+def format_timedelta(td):
+    if isinstance(td, datetime.timedelta):
+        total_seconds = int(td.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return td
+
 @router.post("/", response_model=ScheduleResponse, status_code=status.HTTP_201_CREATED)
 def create_schedule_event(user_id: str, event: ScheduleCreate, conn: mariadb.Connection = Depends(db_connection)):
     new_event_id = str(uuid.uuid4())
@@ -14,16 +25,37 @@ def create_schedule_event(user_id: str, event: ScheduleCreate, conn: mariadb.Con
         INSERT INTO silent_schedule (event_id, user_id, day_of_week, start_time, end_time, event_type)
         VALUES (?, ?, ?, ?, ?, ?)
     """
-    params = (new_event_id, user_id, event.day_of_week, event.start_time.strftime('%H:%M:%S'), event.end_time.strftime('%H:%M:%S'), event.event_type)
+    params = (
+        new_event_id, 
+        user_id, 
+        event.day_of_week, 
+        event.start_time.strftime('%H:%M:%S'), 
+        event.end_time.strftime('%H:%M:%S'), 
+        event.event_type
+    )
     execute_query(conn, insert_query, params, fetch=False)
     
     select_query = "SELECT event_id, user_id, day_of_week, start_time, end_time, event_type FROM silent_schedule WHERE event_id = ?"
-    return execute_query(conn, select_query, (new_event_id,), fetchone=True, dict=True)
+    result = execute_query(conn, select_query, (new_event_id,), fetchone=True, dict=True)
+    
+    # TRADUZIONE ORARIO PRIMA DI RISPONDERE
+    if result:
+        result['start_time'] = format_timedelta(result['start_time'])
+        result['end_time'] = format_timedelta(result['end_time'])
+        
+    return result
 
 @router.get("/", response_model=list[ScheduleResponse])
 def get_user_schedule(user_id: str, conn: mariadb.Connection = Depends(db_connection)):
     query = "SELECT event_id, user_id, day_of_week, start_time, end_time, event_type FROM silent_schedule WHERE user_id = ?"
     schedule = execute_query(conn, query, (user_id,), dict=True)
+    
+    # TRADUZIONE ORARIO PER TUTTA LA LISTA
+    if schedule:
+        for s in schedule:
+            s['start_time'] = format_timedelta(s['start_time'])
+            s['end_time'] = format_timedelta(s['end_time'])
+            
     return schedule if schedule else []
 
 @router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
