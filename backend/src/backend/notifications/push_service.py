@@ -4,7 +4,7 @@ import logging
 import google.generativeai as genai
 import firebase_admin
 from firebase_admin import credentials, messaging
-
+from firebase_admin import messaging
 # 1. INIZIALIZZAZIONE FIREBASE
 firebase_cred_path = os.getenv("FIREBASE_CREDENTIALS_PATH", "firebase-adminsdk.json")
 try:
@@ -85,3 +85,27 @@ def send_proactive_notification_task(user_id: str, intent: str, beacon_id: str, 
         logging.info(f"[Push Service] Notifica inviata: {response}")
     except Exception as e:
         logging.error(f"[Push Service] Errore Firebase: {e}")
+
+def send_simple_notification(user_id: str, title: str, body: str):
+    """
+    Invia una notifica Firebase di solo testo (senza bottoni).
+    """
+    topic_name = f"user_{user_id.replace('-', '_')}" 
+    
+    message = messaging.Message(
+        notification=messaging.Notification(
+            title=title,
+            body=body,
+        ),
+        data={
+            "action": "INFO_REMINDER" # Cambiamo l'azione per chiarezza
+            # NOTA: Non inseriamo "suggestion_id" qui
+        },
+        topic=topic_name
+    )
+    
+    try:
+        messaging.send(message)
+        logging.info(f"Notifica standard inviata a {user_id}: {title}")
+    except Exception as e:
+        logging.error(f"Errore invio notifica standard: {e}")
