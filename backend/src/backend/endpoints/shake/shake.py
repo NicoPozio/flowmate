@@ -4,8 +4,9 @@ import logging
 import mariadb
 from datetime import date
 from db.mariadb import db_connection, execute_query
-# Importiamo i task dal tuo service
-from notifications.push_service import send_proactive_notification_task, send_simple_notification
+
+# IMPORT CORRETTO: Importiamo la funzione specifica per lo shake
+from notifications.push_service import send_shake_notification_task, send_simple_notification
 
 router = APIRouter(tags=["Shake"])
 
@@ -35,7 +36,6 @@ async def trigger_shake_action(
             title = "Attività in corso 🏃"
             body = "Devi ancora finire l'attività di prima!"
 
-        # NOTA: Rimuoviamo 'sugg_id' dalla chiamata. 
         # Senza l'ID, NotificationHelper.kt non mostrerà i pulsanti Accetta/Rifiuta.
         background_tasks.add_task(
             send_simple_notification, 
@@ -71,7 +71,7 @@ async def trigger_shake_action(
         logging.error(f"Errore DB Shake: {e}")
         raise HTTPException(status_code=500, detail="Errore interno del server")
 
-    # 4. Background Task per Gemini (Questa versione INCLUDE l'ID, quindi avrà i bottoni)
+    # 4. Background Task per Gemini (Usa la funzione corretta e inclusa l'ID per i bottoni)
     background_tasks.add_task(
         send_shake_notification_task,
         user_id=user_id,
