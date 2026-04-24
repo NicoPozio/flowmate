@@ -4,6 +4,9 @@ from fastapi import FastAPI
 from fastapi.concurrency import asynccontextmanager
 from fastapi.exceptions import RequestValidationError
 from endpoints.chat.chat import router as chat_router
+#Voice endpoint
+from endpoints.voice.voice import router as voice_router
+
 from db.pool import init_pool, get_pool
 from exceptions import request_validation_exception_handler
 
@@ -72,3 +75,4 @@ app.include_router(presence_router)
 app.include_router(chat_router)
 app.include_router(calendar_router)
 app.include_router(dashboard_router)
+app.include_router(voice_router)
