@@ -20,6 +20,7 @@ from endpoints.beacons.beacons import router as beacons_router
 from endpoints.presence.presence import router as presence_router
 from endpoints.calendar.calendar import router as calendar_router
 from endpoints.dashboard.dashboard import router as dashboard_router
+from endpoints.shake.shake import router as shake_router
 # Lettura delle variabili d'ambiente per la configurazione del database
 db_host = os.getenv("DB_HOST", "flowmate-db")
 db_port = int(os.getenv("DB_PORT", 3306))

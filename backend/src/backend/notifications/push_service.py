@@ -60,23 +60,22 @@ def generate_proactive_push_copy(intent: str, hobby_name: str) -> dict:
 
 def send_proactive_notification_task(user_id: str, intent: str, beacon_id: str, suggestion_id: str, hobby_name: str):
     """
-    Invia la notifica includendo l'ID suggerimento per i bottoni dello smartwatch.
+    Invia la notifica includendo l'ID suggerimento per i bottoni dello smartwatch (DA BEACON).
     """
     logging.info(f"[Push Service] Generazione notifica per {hobby_name}")
     push_data = generate_proactive_push_copy(intent, hobby_name)
     topic_name = f"user_{user_id.replace('-', '_')}" 
     
     message = messaging.Message(
-        notification=messaging.Notification(
-            title=push_data['title'],
-            body=push_data['body'],
-        ),
         data={
+            "title": push_data['title'],
+            "body": push_data['body'],
             "intent": intent,
             "beacon_id": beacon_id,
             "action": "PROACTIVE_SUGGESTION",
             "suggestion_id": suggestion_id  # Collegamento per i bottoni Android
         },
+        android=messaging.AndroidConfig(priority='high'),
         topic=topic_name
     )
     
@@ -85,3 +84,51 @@ def send_proactive_notification_task(user_id: str, intent: str, beacon_id: str, 
         logging.info(f"[Push Service] Notifica inviata: {response}")
     except Exception as e:
         logging.error(f"[Push Service] Errore Firebase: {e}")
+
+def send_simple_notification(user_id: str, title: str, body: str):
+    """
+    Invia una notifica Firebase di solo testo (senza bottoni).
+    """
+    topic_name = f"user_{user_id.replace('-', '_')}" 
+    
+    message = messaging.Message(
+        data={
+            "title": title,
+            "body": body,
+            "action": "INFO_REMINDER" 
+        },
+        android=messaging.AndroidConfig(priority='high'),
+        topic=topic_name
+    )
+    
+    try:
+        messaging.send(message)
+        logging.info(f"Notifica standard inviata a {user_id}: {title}")
+    except Exception as e:
+        logging.error(f"Errore invio notifica standard: {e}")
+
+def send_shake_notification_task(user_id: str, suggestion_id: str, hobby_name: str):
+    """
+    NUOVA FUNZIONE: Invia la notifica specifica per lo shake, senza richiedere beacon_id o intent.
+    """
+    logging.info(f"[Push Service] Generazione notifica SHAKE per {hobby_name}")
+    
+    push_data = generate_proactive_push_copy("fitness", hobby_name)
+    topic_name = f"user_{user_id.replace('-', '_')}" 
+    
+    message = messaging.Message(
+        data={
+            "title": push_data['title'],
+            "body": push_data['body'],
+            "action": "SHAKE_SUGGESTION",
+            "suggestion_id": suggestion_id  
+        },
+        android=messaging.AndroidConfig(priority='high'),
+        topic=topic_name
+    )
+    
+    try:
+        response = messaging.send(message)
+        logging.info(f"[Push Service] Notifica SHAKE inviata: {response}")
+    except Exception as e:
+        logging.error(f"[Push Service] Errore Firebase (Shake): {e}")
