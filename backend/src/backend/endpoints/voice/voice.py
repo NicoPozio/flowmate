@@ -1,5 +1,6 @@
 import os
 import json
+import uuid
 import logging
 from datetime import date
 import google.generativeai as genai
@@ -29,8 +30,18 @@ def generate_voice_response(user_id: str, request: VoiceRequest, conn: mariadb.C
     kcal_burned_today = kcal_logs['total_burned'] if kcal_logs and kcal_logs['total_burned'] is not None else 0
     kcal_mancanti = max(0, daily_goal - kcal_burned_today)
 
-    # 2. CONTROLLO ATTIVITÀ PENDENTE (Nuova Logica)
-    # Cerchiamo se esiste una proposta 'PROPOSED' o 'ACCEPTED' fatta oggi
+    # 2. Recupero Hobby (Fondamentale per fare nuove proposte)
+    hobbies_raw = execute_query(conn, """
+        SELECT h.hobby_id, h.hobby_name, h.met_value, uh.preference_level 
+        FROM user_hobbies uh
+        JOIN hobbies_catalog h ON uh.hobby_id = h.hobby_id
+        WHERE uh.user_id = ?
+        ORDER BY uh.preference_level DESC
+    """, (user_id,), dict=True)
+    
+    hobbies_list = hobbies_raw if hobbies_raw else [{"hobby_id": 1, "hobby_name": "Passeggiata", "preference_level": 5, "met_value": 3.5}]
+
+    # 3. Controllo attività pendente
     pending_act = execute_query(conn, """
         SELECT a.suggestion_id, a.status, h.hobby_name, a.suggested_duration_minutes
         FROM activity_suggestions a
@@ -43,39 +54,53 @@ def generate_voice_response(user_id: str, request: VoiceRequest, conn: mariadb.C
     if pending_act:
         status_context = f"L'utente ha una proposta di {pending_act['hobby_name']} in stato {pending_act['status']}."
 
-    # 3. SYSTEM PROMPT EVOLUTO
-    # Chiediamo a Gemini di decidere se l'utente sta accettando o rifiutando
+    # 4. Prompt Ottimizzato per Vocale (con creazione proposte)
+    # 4. Prompt Ottimizzato per Vocale (con correzione errori STT)
     system_prompt = f"""
-        Sei FlowMate, un Personal Trainer motivatore. 
-        Il tuo obiettivo è aiutare l'utente a BRUCIARE le calorie rimanenti per raggiungere il suo target giornaliero.
+    Sei FlowMate, un Personal Trainer motivatore. Questa è un'interfaccia VOCALE.
+    Le tue risposte verranno lette ad alta voce. Devono essere CONCISE, dirette e colloquiali (massimo 2 frasi). Niente elenchi.
 
-        DATI CORRENTI:
-        - Obiettivo Totale da Bruciare: {daily_goal} kcal
-        - Calorie già bruciate: {kcal_burned_today} kcal
-        - GAP DA COLMARE: {kcal_mancanti} kcal
+    DATI CORRENTI:
+    - GAP DA COLMARE: {kcal_mancanti} kcal
+    - STATO: {status_context}
+    - HOBBY UTENTE: {hobbies_list}
 
-        LOGICA DI RISPOSTA:
-        1. Se l'utente chiede una nuova attività e il GAP è > 0: 
-        Scegli un hobby tra quelli dell'utente e proponi una durata che aiuti a colmare il gap.
-        2. NON suggerire mai di mangiare o fare pasti. Tu ti occupi solo di MOVIMENTO.
-        3. Se non ci sono attività pendenti nel DB, CREANE UNA NUOVA parlandone all'utente.
-        """
+    LOGICA:
+    1. Se lo STATO dice che c'è una proposta in stato "PROPOSED", l'utente deve rispondere.
+       ATTENZIONE: Il microfono fa spesso errori di trascrizione. Se l'utente dice frasi o parole di assenso anche storpiate (es. "accendo", "accetto", "certo", "ok", "va bene", "a letto", "sì"), interpretalo SEMPRE come un'accettazione e metti "action": "ACCEPT".
+       Se dice parole di diniego (es. "no", "rifiuto", "non mi va", "basta"), metti "action": "REJECT".
+    2. Se l'utente accetta o rifiuta, metti la action corrispondente nel JSON e imposta hobby_id a null.
+    3. Se NON ci sono pendenze, proponi un HOBBY dalla sua lista.
+    4. Se lo STATO dice "ACCEPTED": l'utente ha già un'attività in programma per oggi! Fagli i complimenti e ricordagli di farla. NON proporre nulla di nuovo (imposta "hobby_id" a null e "action" a null).
+
+    RITORNA SEMPRE E SOLO QUESTO FORMATO JSON:
+    {{
+        "text": "la tua risposta vocale brevissima",
+        "action": "ACCEPT" oppure "REJECT" oppure null,
+        "hobby_id": ID_DELL_HOBBY (oppure null),
+        "duration": MINUTI (oppure null),
+        "kcal": CALORIE_STIMATE (oppure null)
+    }}
+    """
 
     try:
         model = genai.GenerativeModel('gemini-2.5-flash', generation_config={"response_mime_type": "application/json"})
         response = model.generate_content([system_prompt, request.message])
+        print(f"DEBUG GEMINI RAW RESPONSE: {response.text}") 
         ai_data = json.loads(response.text)
     except Exception as e:
-        ai_data = {"text": "Errore di connessione.", "action": None}
+        logging.error(f"Gemini JSON Error: {e}")
+        ai_data = {"text": "Scusa, non ho capito bene. Riprova.", "action": None, "hobby_id": None}
 
-    # 4. AGGIORNAMENTO DB IN BASE ALLA RISPOSTA (Logica Sync con chat.py)
+    # 5. Esecuzione Azioni DB
     action = ai_data.get("action")
+    hobby_id = ai_data.get("hobby_id")
+
+    # Caso A: L'utente ha accettato/rifiutato un'attività esistente
     if action and pending_act:
         if action == "ACCEPT" and pending_act['status'] == 'PROPOSED':
-            # Snapshot dei minuti active come in chat.py
             current_active = execute_query(conn, "SELECT SUM(active_minutes) as mins FROM biometric_logs WHERE user_id = ? AND record_date = ?", (user_id, today_str), fetchone=True, dict=True)
             baseline = current_active['mins'] if current_active['mins'] else 0
-            
             execute_query(conn, "UPDATE activity_suggestions SET status = 'ACCEPTED', baseline_active_minutes = ? WHERE suggestion_id = ?", 
                           (baseline, pending_act['suggestion_id']), fetch=False)
             
@@ -83,8 +108,19 @@ def generate_voice_response(user_id: str, request: VoiceRequest, conn: mariadb.C
             execute_query(conn, "UPDATE activity_suggestions SET status = 'REJECTED' WHERE suggestion_id = ?", 
                           (pending_act['suggestion_id'],), fetch=False)
 
-    # 5. Salva in cronologia
+    # Caso B: Creazione di una NUOVA proposta (se non c'è nulla in sospeso)
+    elif not pending_act and hobby_id is not None:
+        suggestion_id = str(uuid.uuid4())
+        duration = ai_data.get('duration', 30)
+        kcal = ai_data.get('kcal', 150)
+        
+        execute_query(conn, """
+            INSERT INTO activity_suggestions (suggestion_id, user_id, hobby_id, suggested_duration_minutes, expected_kcal, status)
+            VALUES (?, ?, ?, ?, ?, 'PROPOSED')
+        """, (suggestion_id, user_id, hobby_id, duration, kcal), fetch=False)
+
+    # 6. Salvataggio in cronologia
     execute_query(conn, "INSERT INTO chat_history (user_id, sender_role, message_content) VALUES (?, 'assistant', ?)", 
                   (user_id, ai_data.get('text', "")), fetch=False)
 
-    return VoiceResponse(text=ai_data.get('text', ""))
+    return VoiceResponse(text=ai_data.get('text') or "Non ho nulla da dire al momento.")
