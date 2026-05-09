@@ -15,9 +15,9 @@ try:
 except Exception as e:
     logging.error(f"Errore inizializzazione Firebase: {e}.")
 
-def generate_proactive_push_copy(intent: str, hobby_name: str) -> dict:
+def generate_proactive_push_copy(intent: str, hobby_name: str, zone_name: str = None, minutes_in_zone: int = 0) -> dict:
     """
-    Interroga Gemini per generare il payload della notifica usando l'hobby suggerito.
+    Task 3.2: Genera payload notifica usando l'hobby e il CONTESTO AMBIENTALE.
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if api_key:
@@ -28,9 +28,14 @@ def generate_proactive_push_copy(intent: str, hobby_name: str) -> dict:
     else:
         context_instruction = f"L'utente è in regola con i passi. Suggerisci di rilassarsi facendo {hobby_name}."
 
+    context_ambientale = ""
+    if zone_name:
+        context_ambientale = f"L'utente si trova in '{zone_name}' da {minutes_in_zone} minuti. FAI RIFERIMENTO ALLA STANZA E AL TEMPO TRASCORSO NELLA FRASE."
+
     system_prompt = f"""
     Sei FlowMate, un compagno di benessere amichevole.
     {context_instruction}
+    {context_ambientale}
     
     REGOLE RIGIDE:
     1. Stile: Colloquiale, amichevole, UNA SOLA FRASE fluida (max 20 parole).
@@ -53,17 +58,18 @@ def generate_proactive_push_copy(intent: str, hobby_name: str) -> dict:
         return json.loads(response.text)
     except Exception as e:
         logging.error(f"Errore Gemini Push: {e}")
+        fallback_body = f"Sei in {zone_name} da {minutes_in_zone} min. Facciamo {hobby_name}?" if zone_name else f"Che ne dici di dedicare un po' di tempo a {hobby_name}?"
         return {
             "title": "Momento FlowMate", 
-            "body": f"Che ne dici di dedicare un po' di tempo a {hobby_name}?"
+            "body": fallback_body
         }
 
-def send_proactive_notification_task(user_id: str, intent: str, beacon_id: str, suggestion_id: str, hobby_name: str):
+def send_proactive_notification_task(user_id: str, intent: str, beacon_id: str, suggestion_id: str, hobby_name: str, zone_name: str = None, minutes_in_zone: int = 0):
     """
-    Invia la notifica includendo l'ID suggerimento per i bottoni dello smartwatch (DA BEACON).
+    Invia la notifica includendo l'ID suggerimento e il contesto (Task 3.1)
     """
-    logging.info(f"[Push Service] Generazione notifica per {hobby_name}")
-    push_data = generate_proactive_push_copy(intent, hobby_name)
+    logging.info(f"[Push Service] Generazione notifica per {hobby_name} in {zone_name}")
+    push_data = generate_proactive_push_copy(intent, hobby_name, zone_name, minutes_in_zone)
     topic_name = f"user_{user_id.replace('-', '_')}" 
     
     message = messaging.Message(
@@ -73,7 +79,7 @@ def send_proactive_notification_task(user_id: str, intent: str, beacon_id: str, 
             "intent": intent,
             "beacon_id": beacon_id,
             "action": "PROACTIVE_SUGGESTION",
-            "suggestion_id": suggestion_id  # Collegamento per i bottoni Android
+            "suggestion_id": suggestion_id
         },
         android=messaging.AndroidConfig(priority='high'),
         topic=topic_name
@@ -107,13 +113,13 @@ def send_simple_notification(user_id: str, title: str, body: str):
     except Exception as e:
         logging.error(f"Errore invio notifica standard: {e}")
 
-def send_shake_notification_task(user_id: str, suggestion_id: str, hobby_name: str):
+def send_shake_notification_task(user_id: str, suggestion_id: str, hobby_name: str, zone_name: str = None, minutes_in_zone: int = 0):
     """
-    NUOVA FUNZIONE: Invia la notifica specifica per lo shake, senza richiedere beacon_id o intent.
+    Invia la notifica specifica per lo shake, contestuale.
     """
     logging.info(f"[Push Service] Generazione notifica SHAKE per {hobby_name}")
     
-    push_data = generate_proactive_push_copy("fitness", hobby_name)
+    push_data = generate_proactive_push_copy("fitness", hobby_name, zone_name, minutes_in_zone)
     topic_name = f"user_{user_id.replace('-', '_')}" 
     
     message = messaging.Message(

@@ -2,10 +2,9 @@ from fastapi import APIRouter, BackgroundTasks, Path, Depends, HTTPException
 import uuid
 import logging
 import mariadb
-from datetime import date
+from datetime import date, datetime
 from db.mariadb import db_connection, execute_query
 
-# IMPORT CORRETTO: Importiamo la funzione specifica per lo shake
 from notifications.push_service import send_shake_notification_task, send_simple_notification
 
 router = APIRouter(tags=["Shake"])
@@ -18,7 +17,20 @@ async def trigger_shake_action(
 ):
     today_str = date.today().isoformat()
 
-    # 1. Controlliamo se esiste un'attività PROPOSTA o ACCETTATA per oggi
+    # 1. Recupero Dati Zona
+    presence = execute_query(conn, """
+        SELECT z.beacon_id, b.zone_name, b.associated_hobby_id, z.entry_timestamp 
+        FROM zone_presence_logs z
+        JOIN beacons_catalog b ON z.beacon_id = b.beacon_id
+        WHERE z.user_id = ? AND z.exit_timestamp IS NULL
+        ORDER BY z.entry_timestamp DESC LIMIT 1
+    """, (user_id,), fetchone=True, dict=True)
+
+    beacon_id_val = presence['beacon_id'] if presence else None
+
+    # =========================================================================
+    # 2. CONTROLLO ATTIVITÀ IN CORSO
+    # =========================================================================
     existing_activity = execute_query(conn, """
         SELECT status FROM activity_suggestions 
         WHERE user_id = ? AND status IN ('PROPOSED', 'ACCEPTED') AND DATE(created_at) = ?
@@ -27,56 +39,99 @@ async def trigger_shake_action(
 
     if existing_activity:
         status = existing_activity['status']
-        
-        # Gestione dei casi di blocco con notifiche di promemoria (SENZA BOTTONI)
-        if status == 'PROPOSED':
-            title = "Promemoria FlowMate 📌"
-            body = "Hai una attività già proposta da accettare!"
-        else: # ACCEPTED
-            title = "Attività in corso 🏃"
-            body = "Devi ancora finire l'attività di prima!"
+        title = "Promemoria 📌"
+        body = "Guarda che devi finire ancora la tua attività!" if status == 'ACCEPTED' else "Hai già una proposta in sospeso, accettala o rifiutala!"
+        background_tasks.add_task(send_simple_notification, user_id, title, body)
+        return {"status": "success", "message": "Reminder sent."}
 
-        # Senza l'ID, NotificationHelper.kt non mostrerà i pulsanti Accetta/Rifiuta.
-        background_tasks.add_task(
-            send_simple_notification, 
-            user_id, 
-            title, 
-            body
-        )
-        
-        return {"status": "success", "message": "Reminder sent without buttons."}
-
-    # --- SE LO STATO È LIBERO: LOGICA ORIGINALE ---
-
-    # 2. Recuperiamo l'hobby preferito
-    hobby_data = execute_query(conn, """
-        SELECT h.hobby_id, h.hobby_name 
-        FROM user_hobbies uh
-        JOIN hobbies_catalog h ON uh.hobby_id = h.hobby_id
-        WHERE uh.user_id = ?
-        ORDER BY uh.preference_level DESC LIMIT 1
-    """, (user_id,), fetchone=True, dict=True)
-
-    hobby_id = hobby_data['hobby_id'] if hobby_data else 1
-    hobby_name = hobby_data['hobby_name'] if hobby_data else "una passeggiata"
-
-    # 3. Generiamo il nuovo suggestion_id e inseriamo nel DB
-    new_suggestion_id = str(uuid.uuid4())
+    # =========================================================================
+    # 3. IL CANCELLO DI CONTROLLO (FSM) E NOTIFICHE DI BLOCCO
+    # =========================================================================
     try:
-        execute_query(conn, """
-            INSERT INTO activity_suggestions (suggestion_id, user_id, hobby_id, suggested_duration_minutes, expected_kcal, status)
-            VALUES (?, ?, ?, ?, ?, 'PROPOSED')
-        """, (new_suggestion_id, user_id, hobby_id, 30, 150), fetch=False)
+        execute_query(conn, "CALL EvaluateProactiveState(?, ?, @out_state)", (user_id, beacon_id_val), fetch=False)
+        fsm_res = execute_query(conn, "SELECT @out_state as state", fetchone=True, dict=True)
+        fsm_state = fsm_res['state'] if fsm_res and fsm_res['state'] else "TRIGGER_FITNESS"
     except Exception as e:
-        logging.error(f"Errore DB Shake: {e}")
-        raise HTTPException(status_code=500, detail="Errore interno del server")
+        logging.error(f"Errore FSM: {e}")
+        fsm_state = "TRIGGER_FITNESS"
 
-    # 4. Background Task per Gemini (Usa la funzione corretta e inclusa l'ID per i bottoni)
+    # Se la FSM blocca lo Shake, avvisiamo l'utente con una notifica mirata
+    if fsm_state != "TRIGGER_FITNESS":
+        logging.info(f"Shake neutralizzato. La FSM ha risposto: {fsm_state}")
+        
+        title = "Pausa attiva 🛑"
+        if fsm_state == 'SILENT_COOLDOWN':
+            body = "Hai rifiutato un'attività da poco. Prenditi una pausa, ci riproviamo tra mezz'ora!"
+        elif fsm_state == 'SILENT_USER_OPTED_OUT':
+            body = "Hai impostato lo stop per oggi. Goditi il relax, non ti disturbo!"
+        elif fsm_state == 'SILENT_BUSY_SCHEDULE':
+            body = "Sei nel tuo orario di non disturbo. Torna più tardi!"
+        elif fsm_state == 'SILENT_ZONE_DISABLED':
+            body = "Le notifiche sono disabilitate per questa stanza."
+        else:
+            body = "Al momento non posso suggerirti nulla. Riposati!"
+            
+        background_tasks.add_task(send_simple_notification, user_id, title, body)
+        return {"status": "blocked", "message": f"Azione bloccata dal sistema: {fsm_state}"}
+
+    # =========================================================================
+    # 4. LOGICA CONTESTUALE M3 (ADATTIVA)
+    # =========================================================================
+    zone_name = None
+    minutes_in_zone = 0
+    hobby_id = None
+    hobby_name = "un'attività"
+
+    if presence:
+        zone_name = presence['zone_name']
+        time_diff = datetime.utcnow() - presence['entry_timestamp']
+        minutes_in_zone = max(0, int(time_diff.total_seconds() / 60))
+        
+        if presence['associated_hobby_id']:
+            user_pref = execute_query(conn, """
+                SELECT preference_level 
+                FROM user_hobbies 
+                WHERE user_id = ? AND hobby_id = ?
+            """, (user_id, presence['associated_hobby_id']), fetchone=True, dict=True)
+            
+            if not user_pref or user_pref['preference_level'] > 2:
+                h_info = execute_query(conn, "SELECT hobby_id, hobby_name FROM hobbies_catalog WHERE hobby_id = ?", (presence['associated_hobby_id'],), fetchone=True, dict=True)
+                if h_info:
+                    hobby_id = h_info['hobby_id']
+                    hobby_name = h_info['hobby_name']
+            else:
+                logging.info(f"Hobby del beacon scartato: preference_level={user_pref['preference_level']}. Fallback attivato.")
+
+    # =========================================================================
+    # 5. Fallback: preferito assoluto
+    # =========================================================================
+    if not hobby_id:
+        hobby_data = execute_query(conn, """
+            SELECT h.hobby_id, h.hobby_name 
+            FROM user_hobbies uh
+            JOIN hobbies_catalog h ON uh.hobby_id = h.hobby_id
+            WHERE uh.user_id = ?
+            ORDER BY uh.preference_level DESC LIMIT 1
+        """, (user_id,), fetchone=True, dict=True)
+        if hobby_data:
+            hobby_id = hobby_data['hobby_id']
+            hobby_name = hobby_data['hobby_name']
+
+    # 6. Creazione suggerimento nel DB
+    new_suggestion_id = str(uuid.uuid4())
+    execute_query(conn, """
+        INSERT INTO activity_suggestions (suggestion_id, user_id, hobby_id, suggested_duration_minutes, expected_kcal, status)
+        VALUES (?, ?, ?, 30, 150, 'PROPOSED')
+    """, (new_suggestion_id, user_id, hobby_id), fetch=False)
+
+    # 7. Notifica context-aware
     background_tasks.add_task(
         send_shake_notification_task,
         user_id=user_id,
         suggestion_id=new_suggestion_id,
-        hobby_name=hobby_name
+        hobby_name=hobby_name,
+        zone_name=zone_name,
+        minutes_in_zone=minutes_in_zone
     )
 
-    return {"status": "success", "message": "Shake gesture accepted, AI is working."}
+    return {"status": "success", "message": "Shake context-aware gestito in modo adattivo."}

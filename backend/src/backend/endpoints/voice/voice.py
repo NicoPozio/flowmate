@@ -1,126 +1,203 @@
+# =============================================================================
+# [MODIFIED HCI - 2026-05-09]
+# Modifiche apportate (Milestone 3):
+#   1. ASSORBITA la logica RAG ricca e contestuale.
+#   2. FIX CRASH: Gestione sicura cronologia vuota.
+#   3. FSM GATEKEEPER: Ora le risposte ai blocchi sono DETERMINISTICHE.
+# =============================================================================
+
 import os
 import json
 import uuid
 import logging
-from datetime import date
+import re
+from datetime import date, datetime
 import google.generativeai as genai
 from fastapi import APIRouter, Depends, HTTPException
 import mariadb
 from db.mariadb import db_connection, execute_query
-
 from endpoints.voice.models import VoiceRequest, VoiceResponse
 
-router = APIRouter(prefix="/users/{user_id}", tags=["Voice Assistant"])
+router = APIRouter(prefix="/users/{user_id}/voice", tags=["Voice Assistant"])
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-@router.post("/voice", response_model=VoiceResponse)
+def safe_int(val, default=0):
+    try:
+        if isinstance(val, int): return val
+        nums = re.findall(r'\d+', str(val))
+        return int(nums[0]) if nums else default
+    except:
+        return default
+
+@router.post("", response_model=VoiceResponse)
 def generate_voice_response(user_id: str, request: VoiceRequest, conn: mariadb.Connection = Depends(db_connection)):
     if not GEMINI_API_KEY:
-        raise HTTPException(status_code=500, detail="Gemini API Key non configurata.")
+        return VoiceResponse(text="Attenzione, la chiave API di Gemini è mancante nel server.")
 
-    # 1. Recupero dati utente e calorie
-    user_data = execute_query(conn, "SELECT weight_kg, daily_kcal_goal FROM users WHERE user_id = ?", (user_id,), fetchone=True, dict=True)
     today_str = date.today().isoformat()
-    kcal_logs = execute_query(conn, "SELECT SUM(kcal_burned) as total_burned FROM biometric_logs WHERE user_id = ? AND record_date = ?", (user_id, today_str), fetchone=True, dict=True)
+
+    try:
+        execute_query(conn, "INSERT INTO chat_history (user_id, sender_role, message_content) VALUES (?, 'user', ?)",
+                      (user_id, request.message), fetch=False)
+    except Exception as e:
+        logging.error(f"Errore salvataggio chat: {e}")
+
+    # 1. RECUPERO CONTESTO AMBIENTALE (Beacon attivo)
+    presence = execute_query(conn, """
+        SELECT z.beacon_id, b.zone_name, b.associated_hobby_id, z.entry_timestamp 
+        FROM zone_presence_logs z
+        JOIN beacons_catalog b ON z.beacon_id = b.beacon_id
+        WHERE z.user_id = ? AND z.exit_timestamp IS NULL
+        ORDER BY z.entry_timestamp DESC LIMIT 1
+    """, (user_id,), fetchone=True, dict=True)
+
+    zone_context = "L'utente non è in una zona tracciata al momento."
+    room_hobby_name = None
+    beacon_id_val = None
+    
+    if presence:
+        beacon_id_val = presence['beacon_id']
+        entry_ts = presence['entry_timestamp']
+        if isinstance(entry_ts, str):
+            try: entry_ts = datetime.fromisoformat(entry_ts)
+            except: pass
+        if isinstance(entry_ts, datetime):
+            minutes = int((datetime.now() - entry_ts).total_seconds() / 60)
+            zone_context = f"L'utente si trova in '{presence['zone_name']}' da {minutes} minuti."
+            
+        if presence.get('associated_hobby_id'):
+            user_pref = execute_query(conn, """
+                SELECT preference_level 
+                FROM user_hobbies 
+                WHERE user_id = ? AND hobby_id = ?
+            """, (user_id, presence['associated_hobby_id']), fetchone=True, dict=True)
+            
+            if not user_pref or user_pref['preference_level'] > 2:
+                h_info = execute_query(conn, "SELECT hobby_name FROM hobbies_catalog WHERE hobby_id = ?", 
+                                       (presence['associated_hobby_id'],), fetchone=True, dict=True)
+                room_hobby_name = f"{h_info['hobby_name']} (ID: {presence['associated_hobby_id']})" if h_info else None
+            else:
+                room_hobby_name = None 
+
+    # 2. IL CANCELLO DI CONTROLLO (FSM)
+    try:
+        execute_query(conn, "CALL EvaluateProactiveState(?, ?, @out_state)", (user_id, beacon_id_val), fetch=False)
+        fsm_res = execute_query(conn, "SELECT @out_state as state", fetchone=True, dict=True)
+        fsm_state = fsm_res['state'] if fsm_res and fsm_res['state'] else "TRIGGER_FITNESS"
+    except Exception as e:
+        logging.error(f"Errore FSM: {e}")
+        fsm_state = "TRIGGER_FITNESS"
+
+    # 3. Recupero dati utente
+    user_data = execute_query(conn, "SELECT weight_kg, daily_kcal_goal FROM users WHERE user_id = ?", (user_id,), fetchone=True, dict=True)
+    if not user_data: 
+        return VoiceResponse(text="Scusami, non riesco a trovare il tuo profilo nel sistema.")
+
+    kcal_logs = execute_query(conn, "SELECT SUM(kcal_burned) as total FROM biometric_logs WHERE user_id = ? AND record_date = ?", 
+                              (user_id, today_str), fetchone=True, dict=True)
     
     daily_goal = user_data.get('daily_kcal_goal', 2000)
-    kcal_burned_today = kcal_logs['total_burned'] if kcal_logs and kcal_logs['total_burned'] is not None else 0
+    kcal_burned_today = kcal_logs['total'] if kcal_logs and kcal_logs['total'] is not None else 0
     kcal_mancanti = max(0, daily_goal - kcal_burned_today)
 
-    # 2. Recupero Hobby (Fondamentale per fare nuove proposte)
-    hobbies_raw = execute_query(conn, """
-        SELECT h.hobby_id, h.hobby_name, h.met_value, uh.preference_level 
-        FROM user_hobbies uh
-        JOIN hobbies_catalog h ON uh.hobby_id = h.hobby_id
-        WHERE uh.user_id = ?
-        ORDER BY uh.preference_level DESC
-    """, (user_id,), dict=True)
-    
-    hobbies_list = hobbies_raw if hobbies_raw else [{"hobby_id": 1, "hobby_name": "Passeggiata", "preference_level": 5, "met_value": 3.5}]
+    all_hobbies = execute_query(conn, "SELECT hobby_id, hobby_name FROM hobbies_catalog", dict=True)
+    catalog_context = ", ".join([f"{h['hobby_name']} (ID: {h['hobby_id']})" for h in all_hobbies]) if all_hobbies else ""
 
-    # 3. Controllo attività pendente
     pending_act = execute_query(conn, """
-        SELECT a.suggestion_id, a.status, h.hobby_name, a.suggested_duration_minutes
-        FROM activity_suggestions a
-        JOIN hobbies_catalog h ON a.hobby_id = h.hobby_id
-        WHERE a.user_id = ? AND a.status IN ('PROPOSED', 'ACCEPTED') AND DATE(a.created_at) = ?
-        ORDER BY a.created_at DESC LIMIT 1
+        SELECT suggestion_id, status FROM activity_suggestions 
+        WHERE user_id = ? AND status IN ('PROPOSED', 'ACCEPTED') AND DATE(created_at) = ?
+        ORDER BY created_at DESC LIMIT 1
     """, (user_id, today_str), fetchone=True, dict=True)
 
-    status_context = "Nessuna attività pendente."
-    if pending_act:
-        status_context = f"L'utente ha una proposta di {pending_act['hobby_name']} in stato {pending_act['status']}."
+    history_raw = execute_query(conn, "SELECT sender_role, message_content FROM chat_history WHERE user_id = ? ORDER BY message_timestamp DESC LIMIT 5", (user_id,), dict=True)
+    if not history_raw: history_raw = []
+    chat_context = "\n".join([f"{m['sender_role']}: {m['message_content']}" for m in reversed(history_raw)])
 
-    # 4. Prompt Ottimizzato per Vocale (con creazione proposte)
-    # 4. Prompt Ottimizzato per Vocale (con correzione errori STT)
+    # 4. PROMPT GEMINI AGGIORNATO (Tolto il blocco FSM dal prompt, ora è libero)
     system_prompt = f"""
-    Sei FlowMate, un Personal Trainer motivatore. Questa è un'interfaccia VOCALE.
-    Le tue risposte verranno lette ad alta voce. Devono essere CONCISE, dirette e colloquiali (massimo 2 frasi). Niente elenchi.
+    Sei Minerva, l'assistente vocale di FlowMate. Parla in modo naturale, breve e incoraggiante.
+    
+    CONTESTO ATTUALE:
+    - {zone_context}
+    - Hobby suggerito stanza: {room_hobby_name or "Nessuno specifico"}.
+    - CATALOGO HOBBY GLOBALE (Devi usare solo questi ID numerici): {catalog_context}
+    - Obiettivo: {daily_goal} kcal. Bruciate: {kcal_burned_today} kcal. Mancano: {kcal_mancanti} kcal.
+    - Chat: {chat_context}
 
-    DATI CORRENTI:
-    - GAP DA COLMARE: {kcal_mancanti} kcal
-    - STATO: {status_context}
-    - HOBBY UTENTE: {hobbies_list}
+    REGOLE:
+    1. MASSIMA CONCISIONE: Parla come un compagno di allenamento.
+    2. INSERIMENTO ID: Se decidi di fare una proposta (action="PROPOSE"), DEVI obbligatoriamente inserire in "hobby_id" l'ID numerico corretto letto dal CATALOGO HOBBY.
 
-    LOGICA:
-    1. Se lo STATO dice che c'è una proposta in stato "PROPOSED", l'utente deve rispondere.
-       ATTENZIONE: Il microfono fa spesso errori di trascrizione. Se l'utente dice frasi o parole di assenso anche storpiate (es. "accendo", "accetto", "certo", "ok", "va bene", "a letto", "sì"), interpretalo SEMPRE come un'accettazione e metti "action": "ACCEPT".
-       Se dice parole di diniego (es. "no", "rifiuto", "non mi va", "basta"), metti "action": "REJECT".
-    2. Se l'utente accetta o rifiuta, metti la action corrispondente nel JSON e imposta hobby_id a null.
-    3. Se NON ci sono pendenze, proponi un HOBBY dalla sua lista.
-    4. Se lo STATO dice "ACCEPTED": l'utente ha già un'attività in programma per oggi! Fagli i complimenti e ricordagli di farla. NON proporre nulla di nuovo (imposta "hobby_id" a null e "action" a null).
-
-    RITORNA SEMPRE E SOLO QUESTO FORMATO JSON:
+    RITORNA ESCLUSIVAMENTE QUESTO JSON:
     {{
-        "text": "la tua risposta vocale brevissima",
-        "action": "ACCEPT" oppure "REJECT" oppure null,
-        "hobby_id": ID_DELL_HOBBY (oppure null),
-        "duration": MINUTI (oppure null),
-        "kcal": CALORIE_STIMATE (oppure null)
+        "text": "risposta vocale",
+        "action": "ACCEPT" | "REJECT" | "PROPOSE" | null,
+        "hobby_id": ID (intero) o null,
+        "duration": minuti (intero) o null,
+        "kcal": stima kcal (intero) o null
     }}
     """
 
     try:
         model = genai.GenerativeModel('gemini-2.5-flash', generation_config={"response_mime_type": "application/json"})
         response = model.generate_content([system_prompt, request.message])
-        print(f"DEBUG GEMINI RAW RESPONSE: {response.text}") 
         ai_data = json.loads(response.text)
     except Exception as e:
-        logging.error(f"Gemini JSON Error: {e}")
-        ai_data = {"text": "Scusa, non ho capito bene. Riprova.", "action": None, "hobby_id": None}
+        logging.error(f"Errore generazione Gemini: {e}")
+        ai_data = {"text": "Scusami, ho perso la connessione per un istante.", "action": None}
 
-    # 5. Esecuzione Azioni DB
-    action = ai_data.get("action")
-    hobby_id = ai_data.get("hobby_id")
+    ai_text = str(ai_data.get("text", ai_data.get("response", ai_data.get("message", "Non ho capito."))))
+    action = str(ai_data.get("action", "")).upper() if ai_data.get("action") else None
+    hobby_id = safe_int(ai_data.get("hobby_id"), None)
 
-    # Caso A: L'utente ha accettato/rifiutato un'attività esistente
-    if action and pending_act:
-        if action == "ACCEPT" and pending_act['status'] == 'PROPOSED':
-            current_active = execute_query(conn, "SELECT SUM(active_minutes) as mins FROM biometric_logs WHERE user_id = ? AND record_date = ?", (user_id, today_str), fetchone=True, dict=True)
-            baseline = current_active['mins'] if current_active['mins'] else 0
-            execute_query(conn, "UPDATE activity_suggestions SET status = 'ACCEPTED', baseline_active_minutes = ? WHERE suggestion_id = ?", 
-                          (baseline, pending_act['suggestion_id']), fetch=False)
-            
-        elif action == "REJECT":
-            execute_query(conn, "UPDATE activity_suggestions SET status = 'REJECTED' WHERE suggestion_id = ?", 
+    # =========================================================================
+    # 5. SOVRASCRITTURA DETERMINISTICA (Addio risposte "a caso" di Minerva)
+    # Se Gemini tenta di fare una proposta, lo blocchiamo e imponiamo il testo!
+    # =========================================================================
+    if action == "PROPOSE":
+        if pending_act:
+            if pending_act['status'] == 'PROPOSED':
+                ai_text = "Hai già una proposta in attesa! Controlla il tablet e dimmi se accetti o rifiuti."
+                action = None
+            elif pending_act['status'] == 'ACCEPTED':
+                ai_text = "Guarda che devi finire ancora la tua attività prima di chiedermi altro!"
+                action = None
+        elif fsm_state != "TRIGGER_FITNESS":
+            if fsm_state == 'SILENT_USER_OPTED_OUT':
+                ai_text = "Hai impostato lo stop per oggi. Non ti proporrò nient'altro, goditi il relax!"
+            elif fsm_state == 'SILENT_BUSY_SCHEDULE':
+                ai_text = "Sei nel tuo orario di non disturbo. Torna da me più tardi!"
+            elif fsm_state == 'SILENT_COOLDOWN':
+                ai_text = "Hai appena rifiutato un'attività. Prenditi una pausa, ci riproviamo tra mezz'ora!"
+            elif fsm_state == 'SILENT_ZONE_DISABLED':
+                ai_text = "Le notifiche sono disabilitate per questa stanza. Spostati o riattivale per avere consigli."
+            action = None
+
+    # 6. Esecuzione Azioni Database
+    try:
+        if action in ["ACCEPT", "REJECT"] and pending_act:
+            execute_query(conn, f"UPDATE activity_suggestions SET status = '{action}ED' WHERE suggestion_id = ?", 
                           (pending_act['suggestion_id'],), fetch=False)
+            logging.info(f"Azione {action} eseguita con successo sul DB.")
+            
+        elif action == "PROPOSE" and hobby_id:
+            execute_query(conn, "UPDATE activity_suggestions SET status = 'REJECTED' WHERE user_id = ? AND status IN ('PROPOSED', 'ACCEPTED') AND DATE(created_at) = ?", (user_id, today_str), fetch=False)
+            suggestion_id = str(uuid.uuid4())
+            
+            safe_duration = safe_int(ai_data.get('duration'), 20)
+            safe_kcal = safe_int(ai_data.get('kcal'), 100)
+            
+            execute_query(conn, """
+                INSERT INTO activity_suggestions (suggestion_id, user_id, hobby_id, suggested_duration_minutes, expected_kcal, status)
+                VALUES (?, ?, ?, ?, ?, 'PROPOSED')
+            """, (suggestion_id, user_id, hobby_id, safe_duration, safe_kcal), fetch=False)
 
-    # Caso B: Creazione di una NUOVA proposta (se non c'è nulla in sospeso)
-    elif not pending_act and hobby_id is not None:
-        suggestion_id = str(uuid.uuid4())
-        duration = ai_data.get('duration', 30)
-        kcal = ai_data.get('kcal', 150)
-        
-        execute_query(conn, """
-            INSERT INTO activity_suggestions (suggestion_id, user_id, hobby_id, suggested_duration_minutes, expected_kcal, status)
-            VALUES (?, ?, ?, ?, ?, 'PROPOSED')
-        """, (suggestion_id, user_id, hobby_id, duration, kcal), fetch=False)
+        execute_query(conn, "INSERT INTO chat_history (user_id, sender_role, message_content) VALUES (?, 'assistant', ?)",
+                      (user_id, ai_text), fetch=False)
+    except Exception as e:
+        logging.error(f"Errore DB in fase di azione AI: {e}")
 
-    # 6. Salvataggio in cronologia
-    execute_query(conn, "INSERT INTO chat_history (user_id, sender_role, message_content) VALUES (?, 'assistant', ?)", 
-                  (user_id, ai_data.get('text', "")), fetch=False)
-
-    return VoiceResponse(text=ai_data.get('text') or "Non ho nulla da dire al momento.")
+    return VoiceResponse(text=ai_text)

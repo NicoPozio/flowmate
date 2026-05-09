@@ -6,235 +6,175 @@ CREATE DATABASE flowmate_db;
 USE flowmate_db;
 
 -- ==============================================================================
--- TABELLE CORE UTENTE
+-- TABELLE UTENTE E PREFERENZE
 -- ==============================================================================
-
--- Users Table
 CREATE TABLE users (
-    user_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
+    user_id CHAR(36) PRIMARY KEY,
     username VARCHAR(50) UNIQUE NOT NULL,
     weight_kg DECIMAL(5,2) NOT NULL,
     daily_kcal_goal INT NOT NULL,
-    daily_steps_goal INT NOT NULL DEFAULT 10000,
+    daily_steps_goal INT NOT NULL,
     registration_date DATETIME DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB;
+);
 
--- ==============================================================================
--- CATALOGHI E DIZIONARI
--- ==============================================================================
-
--- Hobbies Catalog (Static Dictionary)
 CREATE TABLE hobbies_catalog (
     hobby_id INT AUTO_INCREMENT PRIMARY KEY,
     hobby_name VARCHAR(100) UNIQUE NOT NULL,
-    met_value DECIMAL(4,2) NOT NULL
-) ENGINE=InnoDB;
+    met_value DECIMAL(4,2) NOT NULL 
+);
 
--- User Hobbies Pivot Table (N:M Relationship)
+INSERT INTO hobbies_catalog (hobby_name, met_value) VALUES
+('Light Walking', 3.0), ('Basketball', 8.0), ('Running', 9.8),
+('Gaming', 1.5), ('Reading', 1.3), ('Yoga', 3.0),
+('Meditation', 1.0), ('Stretching', 2.5), ('Cleaning', 3.5), ('Cooking', 2.0);
+
 CREATE TABLE user_hobbies (
-    user_id CHAR(36),
-    hobby_id INT,
-    preference_level INT,
+    user_id CHAR(36) NOT NULL,
+    hobby_id INT NOT NULL,
+    preference_level INT CHECK (preference_level BETWEEN 1 AND 5),
     PRIMARY KEY (user_id, hobby_id),
-    CONSTRAINT chk_preference CHECK (preference_level >= 1 AND preference_level <= 5),
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (hobby_id) REFERENCES hobbies_catalog(hobby_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
+);
 
 -- ==============================================================================
--- CONTESTO TEMPORALE E BIOMETRICO
+-- TABELLE BEACONS E PRESENZA (Allineate ai router)
 -- ==============================================================================
-
--- Silent Schedule (Availability Matrix)
-CREATE TABLE silent_schedule (
-    event_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
-    user_id CHAR(36),
-    day_of_week INT,
-    start_time TIME NOT NULL,
-    end_time TIME NOT NULL,
-    event_type VARCHAR(50) NOT NULL,
-    CONSTRAINT chk_day CHECK (day_of_week >= 0 AND day_of_week <= 6),
-    CONSTRAINT chk_time CHECK (start_time < end_time),
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
-
--- Biometric Logs (Una riga per utente al giorno - Sincronizzato con Health Connect)
-CREATE TABLE biometric_logs (
-    user_id CHAR(36),
-    record_date DATE NOT NULL,
-    steps_recorded INT DEFAULT 0,
-    active_minutes INT DEFAULT 0,
-    kcal_burned INT DEFAULT 0,
-    PRIMARY KEY (user_id, record_date),
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
-
--- ==============================================================================
--- INFRASTRUTTURA HARDWARE (BEACONS E RATE LIMITING)
--- ==============================================================================
-
--- Beacons Catalog (Registro Hardware con Macchina a Stati Integrata)
 CREATE TABLE beacons_catalog (
-    beacon_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
+    beacon_id CHAR(36) PRIMARY KEY DEFAULT UUID(),
     user_id CHAR(36) NOT NULL,
     hardware_uuid VARCHAR(36) NOT NULL,
     major_id INT NOT NULL,
     minor_id INT NOT NULL,
     zone_name VARCHAR(100) NOT NULL,
-    associated_hobby_id INT,
-    allow_notifications BOOLEAN DEFAULT FALSE,
-    UNIQUE (user_id, hardware_uuid, major_id, minor_id),
+    associated_hobby_id INT DEFAULT NULL,
+    allow_notifications BOOLEAN DEFAULT TRUE,
+    zone_icon VARCHAR(50) DEFAULT 'Place',
+    weekday_from_time TIME DEFAULT '08:00:00',
+    weekday_to_time TIME DEFAULT '22:00:00',
+    weekend_from_time TIME DEFAULT '09:00:00',
+    weekend_to_time TIME DEFAULT '23:00:00',
+    last_seen DATETIME DEFAULT NULL,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (associated_hobby_id) REFERENCES hobbies_catalog(hobby_id) ON DELETE SET NULL
-) ENGINE=InnoDB;
+);
 
--- Zone Presence Logs (Transazioni di permanenza)
 CREATE TABLE zone_presence_logs (
-    presence_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
+    presence_id CHAR(36) PRIMARY KEY DEFAULT UUID(),
     user_id CHAR(36) NOT NULL,
     beacon_id CHAR(36) NOT NULL,
-    entry_timestamp DATETIME NOT NULL,
-    exit_timestamp DATETIME,
-    duration_minutes INT,
+    entry_timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    exit_timestamp DATETIME DEFAULT NULL,
+    duration_minutes INT DEFAULT NULL,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (beacon_id) REFERENCES beacons_catalog(beacon_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
+);
 
--- Sent Notifications (Rate Limiting per evitare Spam)
+-- ==============================================================================
+-- TABELLE BIOMETRICHE E SCHEDULAZIONE
+-- ==============================================================================
+CREATE TABLE biometric_logs (
+    log_id CHAR(36) PRIMARY KEY DEFAULT UUID(),
+    user_id CHAR(36) NOT NULL,
+    record_date DATE NOT NULL,
+    steps_recorded INT DEFAULT 0,
+    active_minutes INT DEFAULT 0,
+    kcal_burned INT DEFAULT 0,
+    UNIQUE KEY unique_user_date (user_id, record_date),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE silent_schedule (
+    event_id CHAR(36) PRIMARY KEY DEFAULT UUID(),
+    user_id CHAR(36) NOT NULL,
+    day_of_week INT NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
+    start_time TIME NOT NULL,
+    end_time TIME NOT NULL,
+    event_type VARCHAR(50) DEFAULT 'Busy',
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+-- ==============================================================================
+-- TABELLA SUGGERIMENTI (Estesa per Milestone 3)
+-- ==============================================================================
+CREATE TABLE activity_suggestions (
+    suggestion_id CHAR(36) PRIMARY KEY DEFAULT UUID(),
+    user_id CHAR(36) NOT NULL,
+    hobby_id INT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    status ENUM('PROPOSED', 'ACCEPTED', 'REJECTED', 'COMPLETED') DEFAULT 'PROPOSED',
+    suggested_duration_minutes INT DEFAULT 30,
+    expected_kcal INT DEFAULT 150,
+    baseline_active_minutes INT DEFAULT 0,
+    completed_at DATETIME DEFAULT NULL,
+    rejection_reason VARCHAR(50) DEFAULT NULL, 
+    rejected_at DATETIME DEFAULT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (hobby_id) REFERENCES hobbies_catalog(hobby_id) ON DELETE CASCADE
+);
+
+CREATE TABLE chat_history (
+    message_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id CHAR(36) NOT NULL,
+    sender_role ENUM('user', 'assistant') NOT NULL,
+    message_content TEXT NOT NULL,
+    message_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+-- Tabella di supporto per lo storico notifiche (richiesta da presence.py)
 CREATE TABLE sent_notifications (
-    notification_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
+    notification_id INT AUTO_INCREMENT PRIMARY KEY,
     user_id CHAR(36) NOT NULL,
     beacon_id CHAR(36) NOT NULL,
     sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (beacon_id) REFERENCES beacons_catalog(beacon_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
-
+);
 -- ==============================================================================
--- LOGICA FUNZIONALE E STORICO
+-- STORED PROCEDURE: MACCHINA A STATI (FSM) — FIX G
 -- ==============================================================================
-
--- Activity Suggestions Log (Tracciamento ciclo di vita raccomandazioni)
-CREATE TABLE activity_suggestions (
-    suggestion_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
-    user_id CHAR(36) NOT NULL,
-    hobby_id INT NOT NULL,
-    suggested_duration_minutes INT NOT NULL,
-    expected_kcal INT NOT NULL, 
-    baseline_active_minutes INT DEFAULT 0, 
-    status VARCHAR(20) DEFAULT 'PROPOSED', 
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    completed_at DATETIME, 
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-    FOREIGN KEY (hobby_id) REFERENCES hobbies_catalog(hobby_id) ON DELETE RESTRICT
-) ENGINE=InnoDB;
-
--- Chat History (Memoria per LLM)
-CREATE TABLE chat_history (
-    message_id CHAR(36) DEFAULT UUID() PRIMARY KEY,
-    user_id CHAR(36),
-    sender_role VARCHAR(20),
-    message_content TEXT NOT NULL,
-    message_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_role CHECK (sender_role IN ('user', 'assistant', 'system')),
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
-
--- ==============================================================================
--- OTTIMIZZAZIONE E SEED DATA
--- ==============================================================================
-
--- Performance Optimization Indexes (B-Tree)
-CREATE INDEX idx_biometric_logs_user_time ON biometric_logs(user_id, record_date DESC);
-CREATE INDEX idx_chat_history_user_time ON chat_history(user_id, message_timestamp DESC);
-CREATE INDEX idx_schedule_user_day ON silent_schedule(user_id, day_of_week);
-CREATE INDEX idx_sent_notifications_time ON sent_notifications(user_id, beacon_id, sent_at DESC);
-CREATE INDEX idx_suggestions_user_status ON activity_suggestions(user_id, status);
-
--- Seed Data Initialization
-INSERT INTO hobbies_catalog (hobby_name, met_value) VALUES
-('Light Walking', 3.5),
-('Basketball', 8.0),
-('Running', 10.0),
-('Gaming', 1.5),
-('Reading', 1.3);
-
-
--- ==============================================================================
--- MACCHINA A STATI FINITI (STORED PROCEDURE AGGIORNATA)
--- ==============================================================================
-
 DELIMITER //
 
 CREATE PROCEDURE EvaluateProactiveState(
     IN p_user_id CHAR(36),
-    IN p_beacon_id CHAR(36),
-    OUT p_action_state VARCHAR(50)
+    IN p_beacon_id CHAR(36), -- Aggiunto beacon_id per match con presence.py
+    OUT p_state VARCHAR(50)
 )
-BEGIN
-    DECLARE v_allow_notifications BOOLEAN DEFAULT FALSE;
-    DECLARE v_recent_spam_count INT DEFAULT 0;
-    DECLARE v_pending_proposals INT DEFAULT 0;
-    DECLARE v_is_free_time INT DEFAULT 0;
-    DECLARE v_kcal_goal INT DEFAULT 0;
-    DECLARE v_kcal_burned INT DEFAULT 0;
-    
-    DECLARE v_current_day INT;
-    DECLARE v_current_time TIME;
+proc_exit: BEGIN
+    DECLARE var_current_time TIME;
+    DECLARE var_current_day INT;
+    DECLARE var_busy_count INT;
+    DECLARE var_opt_out_count INT;
+    DECLARE var_recent_suggestion_count INT;
+    DECLARE var_allow_notif BOOLEAN;
 
-    SET v_current_day = WEEKDAY(CURRENT_DATE());
-    SET v_current_time = CURRENT_TIME();
+    SET var_current_time = CURRENT_TIME();
+    SET var_current_day = WEEKDAY(CURRENT_DATE());
 
-    -- 1. Controllo se la zona del beacon permette notifiche
-    SELECT allow_notifications INTO v_allow_notifications 
-    FROM beacons_catalog 
-    WHERE beacon_id = p_beacon_id AND user_id = p_user_id;
+    -- 1. Check OPT-OUT odierno
+    SELECT COUNT(*) INTO var_opt_out_count FROM activity_suggestions
+    WHERE user_id = p_user_id AND status = 'REJECTED' AND rejection_reason = 'today_no' AND DATE(created_at) = CURDATE();
 
-    -- 2. Controllo Rate Limiting (Spam): max 1 notifica per ora per questo beacon
-    SELECT COUNT(*) INTO v_recent_spam_count 
-    FROM sent_notifications 
-    WHERE user_id = p_user_id AND beacon_id = p_beacon_id AND sent_at >= NOW() - INTERVAL 1 HOUR;
+    IF var_opt_out_count > 0 THEN SET p_state = 'SILENT_USER_OPTED_OUT'; LEAVE proc_exit; END IF;
 
-    -- 3. Controllo Proposte Pendenti: se c'è già un PROPOSED attivo oggi, non disturbare
-    SELECT COUNT(*) INTO v_pending_proposals 
-    FROM activity_suggestions 
-    WHERE user_id = p_user_id 
-      AND status = 'PROPOSED' 
-      AND DATE(created_at) = CURRENT_DATE();
+    -- 2. Check FASCIA BUSY
+    SELECT COUNT(*) INTO var_busy_count FROM silent_schedule
+    WHERE user_id = p_user_id AND day_of_week = var_current_day AND event_type = 'Busy' AND var_current_time BETWEEN start_time AND end_time;
 
-    -- 4. Controllo Calendario: l'utente deve essere in un blocco "Free Time"
-    SELECT COUNT(*) INTO v_is_free_time 
-    FROM silent_schedule 
-    WHERE user_id = p_user_id 
-      AND day_of_week = v_current_day 
-      AND start_time <= v_current_time 
-      AND end_time >= v_current_time
-      AND event_type = 'Free Time';
+    IF var_busy_count > 0 THEN SET p_state = 'SILENT_BUSY_SCHEDULE'; LEAVE proc_exit; END IF;
 
-    -- 5. Recupero obiettivi e progresso odierno
-    SELECT daily_kcal_goal INTO v_kcal_goal FROM users WHERE user_id = p_user_id;
-    
-    SELECT IFNULL(kcal_burned, 0) INTO v_kcal_burned 
-    FROM biometric_logs 
-    WHERE user_id = p_user_id AND record_date = CURRENT_DATE();
+    -- 3. Check COOLDOWN (30 min)
+    SELECT COUNT(*) INTO var_recent_suggestion_count FROM activity_suggestions
+    WHERE user_id = p_user_id AND created_at > DATE_SUB(NOW(), INTERVAL 30 MINUTE) AND status != 'COMPLETED';
 
-    -- ==========================================================================
-    -- LOGICA DI USCITA (GERARCHIA)
-    -- ==========================================================================
-    IF v_allow_notifications = FALSE THEN
-        SET p_action_state = 'SILENT_DND_ZONE';
-    ELSEIF v_recent_spam_count > 0 THEN
-        SET p_action_state = 'SILENT_RATE_LIMITED';
-    ELSEIF v_pending_proposals > 0 THEN
-        SET p_action_state = 'SILENT_PROPOSAL_PENDING';
-    ELSEIF v_is_free_time = 0 THEN
-        SET p_action_state = 'SILENT_BUSY_SCHEDULE';
-    ELSEIF v_kcal_burned < v_kcal_goal THEN
-        SET p_action_state = 'TRIGGER_FITNESS';
-    ELSE
-        SET p_action_state = 'TRIGGER_HOBBY';
-    END IF;
+    IF var_recent_suggestion_count > 0 THEN SET p_state = 'SILENT_COOLDOWN'; LEAVE proc_exit; END IF;
 
+    -- 4. Check ALLOW_NOTIFICATIONS sulla zona specifica
+    SELECT allow_notifications INTO var_allow_notif FROM beacons_catalog WHERE beacon_id = p_beacon_id;
+    IF var_allow_notif = FALSE THEN SET p_state = 'SILENT_ZONE_DISABLED'; LEAVE proc_exit; END IF;
+
+    -- 5. TRIGGER! (Semplificato per la demo)
+    SET p_state = 'TRIGGER_FITNESS';
 END //
 
 DELIMITER ;

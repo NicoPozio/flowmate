@@ -39,7 +39,7 @@ def log_presence_entry(
     background_tasks: BackgroundTasks,
     conn: mariadb.Connection = Depends(db_connection)
 ):
-    # 1. Cleanup sessioni appese (Paracadute lato server)
+    # 1. Cleanup sessioni appese 
     cleanup_query = """
         UPDATE zone_presence_logs 
         SET exit_timestamp = UTC_TIMESTAMP(), 
@@ -48,8 +48,8 @@ def log_presence_entry(
     """
     execute_query(conn, cleanup_query, (user_id,), fetch=False)
 
-    # 2. Verifica beacon e recupero hobby associato
-    check_beacon = execute_query(conn, "SELECT beacon_id, associated_hobby_id FROM beacons_catalog WHERE beacon_id = ?", (req.beacon_id,), fetchone=True, dict=True)
+    # 2. Verifica beacon e recupero info zona
+    check_beacon = execute_query(conn, "SELECT beacon_id, associated_hobby_id, zone_name FROM beacons_catalog WHERE beacon_id = ?", (req.beacon_id,), fetchone=True, dict=True)
     if not check_beacon:
         raise HTTPException(status_code=400, detail="Invalid beacon_id")
 
@@ -71,12 +71,25 @@ def log_presence_entry(
     
     intent = "fitness" if action_state == "TRIGGER_FITNESS" else "hobby" if action_state == "TRIGGER_HOBBY" else None
 
-    # 5. LOGICA SUGGERIMENTO (Basata su preferenze utente)
+    # 5. LOGICA SUGGERIMENTO ADATTIVA
     if intent:
         try:
-            # Recuperiamo l'hobby preferito o quello associato al beacon
             hobby_id = check_beacon['associated_hobby_id']
             hobby_name = "un'attività"
+
+            # --- NUOVA LOGICA ADATTIVA (Controllo Punteggio) ---
+            if hobby_id:
+                user_pref = execute_query(conn, """
+                    SELECT preference_level 
+                    FROM user_hobbies 
+                    WHERE user_id = ? AND hobby_id = ?
+                """, (user_id, hobby_id), fetchone=True, dict=True)
+                
+                # Se l'utente ha penalizzato l'hobby ambientale (1 o 2), lo scartiamo in automatico
+                if user_pref and user_pref['preference_level'] <= 2:
+                    logging.info(f"Hobby ambientale ignorato per punteggio basso ({user_pref['preference_level']}). Attivazione Fallback.")
+                    hobby_id = None
+            # ---------------------------------------------------
 
             if not hobby_id:
                 fav_hobby = execute_query(conn, """
@@ -90,12 +103,11 @@ def log_presence_entry(
                     hobby_id = fav_hobby['hobby_id']
                     hobby_name = fav_hobby['hobby_name']
                 else:
-                    hobby_id = 1 # Fallback
+                    hobby_id = 1 
             else:
                 h_info = execute_query(conn, "SELECT hobby_name FROM hobbies_catalog WHERE hobby_id = ?", (hobby_id,), fetchone=True, dict=True)
                 if h_info: hobby_name = h_info['hobby_name']
 
-            # Creazione Proposta nel DB
             suggestion_id = str(uuid.uuid4())
             execute_query(conn, """
                 UPDATE activity_suggestions 
@@ -108,11 +120,20 @@ def log_presence_entry(
                 VALUES (?, ?, ?, ?, ?, 'PROPOSED')
             """, (suggestion_id, user_id, hobby_id, 30, 150), fetch=False)
 
-            # Rate Limit Notifiche
             execute_query(conn, "INSERT INTO sent_notifications (user_id, beacon_id) VALUES (?, ?)", (user_id, req.beacon_id), fetch=False)
             
-            # Lancio task con hobby_name per Gemini
-            background_tasks.add_task(send_proactive_notification_task, user_id, intent, req.beacon_id, suggestion_id, hobby_name)
+            minutes = 0
+            
+            background_tasks.add_task(
+                send_proactive_notification_task, 
+                user_id, 
+                intent, 
+                req.beacon_id, 
+                suggestion_id, 
+                hobby_name,
+                check_beacon['zone_name'],
+                minutes
+            )
             
         except Exception as e:
             logging.warning(f"Errore generazione suggerimento proattivo: {e}")
