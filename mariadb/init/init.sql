@@ -121,6 +121,7 @@ CREATE TABLE chat_history (
     message_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
+
 -- Tabella di supporto per lo storico notifiche (richiesta da presence.py)
 CREATE TABLE sent_notifications (
     notification_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -130,8 +131,9 @@ CREATE TABLE sent_notifications (
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (beacon_id) REFERENCES beacons_catalog(beacon_id) ON DELETE CASCADE
 );
+
 -- ==============================================================================
--- STORED PROCEDURE: MACCHINA A STATI (FSM) — FIX G
+-- STORED PROCEDURE: MACCHINA A STATI (FSM) — FIX G + UPGRADE M4
 -- ==============================================================================
 DELIMITER //
 
@@ -163,9 +165,10 @@ proc_exit: BEGIN
 
     IF var_busy_count > 0 THEN SET p_state = 'SILENT_BUSY_SCHEDULE'; LEAVE proc_exit; END IF;
 
-    -- 3. Check COOLDOWN (30 min)
+    -- 3. Check COOLDOWN (30 min) (FIX M4: Ignora i rifiuti 'change_activity' per permettere il Reroll)
     SELECT COUNT(*) INTO var_recent_suggestion_count FROM activity_suggestions
-    WHERE user_id = p_user_id AND created_at > DATE_SUB(NOW(), INTERVAL 30 MINUTE) AND status != 'COMPLETED';
+    WHERE user_id = p_user_id AND created_at > DATE_SUB(NOW(), INTERVAL 30 MINUTE) AND status != 'COMPLETED'
+    AND (rejection_reason IS NULL OR rejection_reason != 'change_activity');
 
     IF var_recent_suggestion_count > 0 THEN SET p_state = 'SILENT_COOLDOWN'; LEAVE proc_exit; END IF;
 
