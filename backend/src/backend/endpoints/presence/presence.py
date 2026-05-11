@@ -39,7 +39,6 @@ def log_presence_entry(
     background_tasks: BackgroundTasks,
     conn: mariadb.Connection = Depends(db_connection)
 ):
-    # 1. Cleanup sessioni appese 
     cleanup_query = """
         UPDATE zone_presence_logs 
         SET exit_timestamp = UTC_TIMESTAMP(), 
@@ -48,12 +47,10 @@ def log_presence_entry(
     """
     execute_query(conn, cleanup_query, (user_id,), fetch=False)
 
-    # 2. Verifica beacon e recupero info zona
     check_beacon = execute_query(conn, "SELECT beacon_id, associated_hobby_id, zone_name FROM beacons_catalog WHERE beacon_id = ?", (req.beacon_id,), fetchone=True, dict=True)
     if not check_beacon:
         raise HTTPException(status_code=400, detail="Invalid beacon_id")
 
-    # 3. Registra ingresso
     new_presence_id = str(uuid.uuid4())
     now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
     
@@ -64,20 +61,17 @@ def log_presence_entry(
     execute_query(conn, insert_query, (new_presence_id, user_id, req.beacon_id, now_str), fetch=False)
     presence_data = execute_query(conn, "SELECT * FROM zone_presence_logs WHERE presence_id = ?", (new_presence_id,), fetchone=True, dict=True)
 
-    # 4. Valutazione AI/Proattiva (Macchina a stati)
     execute_query(conn, "CALL EvaluateProactiveState(?, ?, @p_action_state)", (user_id, req.beacon_id), fetch=False)
     state_result = execute_query(conn, "SELECT @p_action_state AS state", fetchone=True, dict=True)
     action_state = state_result['state'] if state_result and state_result['state'] else "SILENT_UNKNOWN"
     
     intent = "fitness" if action_state == "TRIGGER_FITNESS" else "hobby" if action_state == "TRIGGER_HOBBY" else None
 
-    # 5. LOGICA SUGGERIMENTO ADATTIVA
     if intent:
         try:
             hobby_id = check_beacon['associated_hobby_id']
             hobby_name = "un'attività"
 
-            # --- NUOVA LOGICA ADATTIVA (Controllo Punteggio) ---
             if hobby_id:
                 user_pref = execute_query(conn, """
                     SELECT preference_level 
@@ -85,11 +79,9 @@ def log_presence_entry(
                     WHERE user_id = ? AND hobby_id = ?
                 """, (user_id, hobby_id), fetchone=True, dict=True)
                 
-                # Se l'utente ha penalizzato l'hobby ambientale (1 o 2), lo scartiamo in automatico
                 if user_pref and user_pref['preference_level'] <= 2:
                     logging.info(f"Hobby ambientale ignorato per punteggio basso ({user_pref['preference_level']}). Attivazione Fallback.")
                     hobby_id = None
-            # ---------------------------------------------------
 
             if not hobby_id:
                 fav_hobby = execute_query(conn, """
@@ -124,6 +116,9 @@ def log_presence_entry(
             
             minutes = 0
             
+            # =====================================================================
+            # CHIAMATA NOTIFICA PUSH: Questo invia la notifica del Beacon via Firebase
+            # =====================================================================
             background_tasks.add_task(
                 send_proactive_notification_task, 
                 user_id, 

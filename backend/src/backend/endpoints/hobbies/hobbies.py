@@ -27,3 +27,15 @@ def set_user_hobbies(user_id: str, hobbies: list[UserHobbyCreate], conn: mariadb
     
     select_query = "SELECT user_id, hobby_id, preference_level FROM user_hobbies WHERE user_id = ?"
     return execute_query(conn, select_query, (user_id,), dict=True)
+
+@router.get("/users/{user_id}/hobbies/favorites", response_model=list[HobbyResponse])
+def get_favorite_hobbies(user_id: str, conn: mariadb.Connection = Depends(db_connection)):
+    query = """
+        SELECT hc.hobby_id, hc.hobby_name, hc.met_value 
+        FROM hobbies_catalog hc
+        JOIN user_hobbies uh ON hc.hobby_id = uh.hobby_id
+        WHERE uh.user_id = ? AND uh.preference_level > 2
+        ORDER BY uh.preference_level DESC
+    """
+    catalog = execute_query(conn, query, (user_id,), dict=True)
+    return catalog if catalog else []
