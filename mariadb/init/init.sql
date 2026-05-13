@@ -40,6 +40,9 @@ CREATE TABLE user_hobbies (
 -- ==============================================================================
 -- TABELLE BEACONS E PRESENZA (Allineate ai router)
 -- ==============================================================================
+-- ==============================================================================
+-- TABELLE BEACONS E PRESENZA
+-- ==============================================================================
 CREATE TABLE beacons_catalog (
     beacon_id CHAR(36) PRIMARY KEY DEFAULT UUID(),
     user_id CHAR(36) NOT NULL,
@@ -54,6 +57,7 @@ CREATE TABLE beacons_catalog (
     weekday_to_time TIME DEFAULT '22:00:00',
     weekend_from_time TIME DEFAULT '09:00:00',
     weekend_to_time TIME DEFAULT '23:00:00',
+    inactivity_timeout_minutes INT DEFAULT NULL, -- NUOVO CAMPO (NULL = disabilitato)
     last_seen DATETIME DEFAULT NULL,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (associated_hobby_id) REFERENCES hobbies_catalog(hobby_id) ON DELETE SET NULL
