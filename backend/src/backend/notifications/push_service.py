@@ -17,35 +17,42 @@ except Exception as e:
 
 def generate_proactive_push_copy(intent: str, hobby_name: str, zone_name: str = None, minutes_in_zone: int = 0) -> dict:
     """
-    Task 3.2: Genera payload notifica usando l'hobby e il CONTESTO AMBIENTALE.
+    Genera payload notifica usando l'hobby e il CONTESTO AMBIENTALE,
+    copiando il tono di Minerva e integrando le stime di tempo e calorie.
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if api_key:
         genai.configure(api_key=api_key)
 
     if intent == "fitness":
-        context_instruction = f"L'utente deve raggiungere il suo obiettivo fisico. Suggerisci caldamente di fare {hobby_name}."
+        context_instruction = f"L'utente deve raggiungere il suo obiettivo fisico. Suggerisci caldamente di fare {hobby_name} e stima durata e calorie."
     else:
-        context_instruction = f"L'utente è in regola con i passi. Suggerisci di rilassarsi facendo {hobby_name}."
+        context_instruction = f"L'utente è in regola con i passi. Suggerisci di rilassarsi facendo {hobby_name} e stima durata e calorie."
 
-    context_ambientale = ""
+    context_ambientale = "L'utente non si trova in una stanza specifica al momento."
     if zone_name:
-        context_ambientale = f"L'utente si trova in '{zone_name}' da {minutes_in_zone} minuti. FAI RIFERIMENTO ALLA STANZA E AL TEMPO TRASCORSO NELLA FRASE."
+        context_ambientale = f"L'utente si trova in '{zone_name}' da {minutes_in_zone} minuti. FAI RIFERIMENTO ALLA STANZA E AL TEMPO TRASCORSO."
 
+    # =========================================================================
+    # IL PROMPT: COPIA LA PERSONALITÀ DI MINERVA E MOSTRA LE KCAL/TEMPO
+    # =========================================================================
     system_prompt = f"""
-    Sei FlowMate, un compagno di benessere amichevole.
-    {context_instruction}
-    {context_ambientale}
+    Sei Minerva, l'assistente vocale di FlowMate. Parla in modo naturale, breve e incoraggiante.
+    
+    CONTESTO ATTUALE:
+    - {context_ambientale}
+    - Istruzione: {context_instruction}
     
     REGOLE RIGIDE:
-    1. Stile: Colloquiale, amichevole, UNA SOLA FRASE fluida (max 20 parole).
-    2. Titolo: Accattivante, max 4 parole.
-    3. NO EMOJI: Non usarne mai.
+    1. MASSIMA CONCISIONE: Parla come un compagno di allenamento in UNA SOLA FRASE (max 20-25 parole).
+    2. STIMA CALORIE E DURATA: Nel testo ("body"), inserisci sempre in modo naturale i minuti previsti e le calorie stimate (es. "...facendo 20 min di attività, brucerai circa 150 kcal!").
+    3. Titolo: Accattivante, max 4 parole.
+    4. NO EMOJI: Non usarne mai.
     
-    Restituisci JSON:
+    RITORNA ESCLUSIVAMENTE QUESTO JSON:
     {{
         "title": "Titolo",
-        "body": "Messaggio naturale che nomina l'attività suggerita"
+        "body": "Messaggio naturale che nomina l'attività, il tempo e le calorie stimate"
     }}
     """
 
@@ -58,7 +65,8 @@ def generate_proactive_push_copy(intent: str, hobby_name: str, zone_name: str = 
         return json.loads(response.text)
     except Exception as e:
         logging.error(f"Errore Gemini Push: {e}")
-        fallback_body = f"Sei in {zone_name} da {minutes_in_zone} min. Facciamo {hobby_name}?" if zone_name else f"Che ne dici di dedicare un po' di tempo a {hobby_name}?"
+        # Testo di fallback aggiornato per includere stime standard se non c'è internet
+        fallback_body = f"Sei in {zone_name} da {minutes_in_zone} min. Facciamo {hobby_name} per 20 min (circa 100 kcal)?" if zone_name else f"Che ne dici di {hobby_name} per 20 min, bruciando circa 100 kcal?"
         return {
             "title": "Momento FlowMate", 
             "body": fallback_body
@@ -66,7 +74,7 @@ def generate_proactive_push_copy(intent: str, hobby_name: str, zone_name: str = 
 
 def send_proactive_notification_task(user_id: str, intent: str, beacon_id: str, suggestion_id: str, hobby_name: str, zone_name: str = None, minutes_in_zone: int = 0):
     """
-    Invia la notifica includendo l'ID suggerimento e il contesto (Task 3.1)
+    Invia la notifica includendo l'ID suggerimento e il contesto
     """
     logging.info(f"[Push Service] Generazione notifica per {hobby_name} in {zone_name}")
     push_data = generate_proactive_push_copy(intent, hobby_name, zone_name, minutes_in_zone)

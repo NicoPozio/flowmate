@@ -1,9 +1,15 @@
 # =============================================================================
-# [MODIFIED HCI - 2026-05-09]
-# Modifiche apportate (Milestone 3):
+# [MODIFIED HCI - 2026-05-12]
+# Modifiche apportate (Milestone 3 - Ottimizzazione):
 #   1. ASSORBITA la logica RAG ricca e contestuale.
 #   2. FIX CRASH: Gestione sicura cronologia vuota.
 #   3. FSM GATEKEEPER: Ora le risposte ai blocchi sono DETERMINISTICHE.
+#   4. FIX BUG CHAT HISTORY: Ancoraggio esplicito allo stato del DB.
+#   5. FIX BUG ANTI-LOOP: Ereditata logica di shake.py per il fallback.
+#   6. FIX VOCALE: Obbligo di pronunciare Kcal e Durata.
+#   7. FIX CATALOGO: Ora Minerva pesca SOLO dagli hobby preferiti dell'utente (NON globale).
+#   8. FIX RIFIUTO RAPIDO: Regola rigida per forzare action="REJECT" se l'utente dice no.
+#   9. FIX ESAURIMENTO HOBBY: Se tutte le attività sono state rifiutate, scatta la pausa forzata.
 # =============================================================================
 
 import os
@@ -68,19 +74,72 @@ def generate_voice_response(user_id: str, request: VoiceRequest, conn: mariadb.C
             minutes = int((datetime.now() - entry_ts).total_seconds() / 60)
             zone_context = f"L'utente si trova in '{presence['zone_name']}' da {minutes} minuti."
             
+        # FIX ANTI-LOOP: Controlla se l'hobby della stanza è valido o già rifiutato
         if presence.get('associated_hobby_id'):
+            assoc_hobby = presence['associated_hobby_id']
             user_pref = execute_query(conn, """
                 SELECT preference_level 
                 FROM user_hobbies 
                 WHERE user_id = ? AND hobby_id = ?
-            """, (user_id, presence['associated_hobby_id']), fetchone=True, dict=True)
+            """, (user_id, assoc_hobby), fetchone=True, dict=True)
             
-            if not user_pref or user_pref['preference_level'] > 2:
-                h_info = execute_query(conn, "SELECT hobby_name FROM hobbies_catalog WHERE hobby_id = ?", 
-                                       (presence['associated_hobby_id'],), fetchone=True, dict=True)
-                room_hobby_name = f"{h_info['hobby_name']} (ID: {presence['associated_hobby_id']})" if h_info else None
+            if user_pref and user_pref['preference_level'] > 2:
+                already_rejected = execute_query(conn, """
+                    SELECT 1 FROM activity_suggestions 
+                    WHERE user_id = ? AND hobby_id = ? AND status = 'REJECTED' AND DATE(created_at) = CURDATE()
+                """, (user_id, assoc_hobby), fetchone=True)
+                
+                if not already_rejected:
+                    h_info = execute_query(conn, "SELECT hobby_name FROM hobbies_catalog WHERE hobby_id = ?", 
+                                           (assoc_hobby,), fetchone=True, dict=True)
+                    room_hobby_name = f"{h_info['hobby_name']} (ID: {assoc_hobby})" if h_info else None
+                else:
+                    room_hobby_name = None
             else:
                 room_hobby_name = None 
+
+    # =========================================================================
+    # FIX CATALOGO: Pesca SOLO le attività preferite non ancora rifiutate
+    # =========================================================================
+    user_available_hobbies = execute_query(conn, """
+        SELECT h.hobby_id, h.hobby_name 
+        FROM user_hobbies uh
+        JOIN hobbies_catalog h ON uh.hobby_id = h.hobby_id
+        WHERE uh.user_id = ?
+        AND uh.preference_level > 2
+        AND NOT EXISTS (
+            SELECT 1 FROM activity_suggestions a
+            WHERE a.hobby_id = uh.hobby_id 
+            AND a.user_id = uh.user_id 
+            AND a.status = 'REJECTED' 
+            AND DATE(a.created_at) = CURDATE()
+        )
+    """, (user_id,), dict=True)
+
+    if not user_available_hobbies:
+        catalog_context = "NESSUN HOBBY DISPONIBILE (Tutti rifiutati per oggi)."
+    else:
+        catalog_context = ", ".join([f"{h['hobby_name']} (ID: {h['hobby_id']})" for h in user_available_hobbies])
+
+    # Fallback logica shake: se la stanza non ha hobby validi, pesca il migliore dalla lista
+    if not room_hobby_name and user_available_hobbies:
+        hobby_data = execute_query(conn, """
+            SELECT h.hobby_id, h.hobby_name 
+            FROM user_hobbies uh
+            JOIN hobbies_catalog h ON uh.hobby_id = h.hobby_id
+            WHERE uh.user_id = ?
+            AND uh.preference_level > 2
+            AND NOT EXISTS (
+                SELECT 1 FROM activity_suggestions a
+                WHERE a.hobby_id = uh.hobby_id 
+                AND a.user_id = uh.user_id 
+                AND a.status = 'REJECTED' 
+                AND DATE(a.created_at) = CURDATE()
+            )
+            ORDER BY uh.preference_level DESC LIMIT 1
+        """, (user_id,), fetchone=True, dict=True)
+        if hobby_data:
+            room_hobby_name = f"{hobby_data['hobby_name']} (ID: {hobby_data['hobby_id']})"
 
     # 2. IL CANCELLO DI CONTROLLO (FSM)
     try:
@@ -103,9 +162,6 @@ def generate_voice_response(user_id: str, request: VoiceRequest, conn: mariadb.C
     kcal_burned_today = kcal_logs['total'] if kcal_logs and kcal_logs['total'] is not None else 0
     kcal_mancanti = max(0, daily_goal - kcal_burned_today)
 
-    all_hobbies = execute_query(conn, "SELECT hobby_id, hobby_name FROM hobbies_catalog", dict=True)
-    catalog_context = ", ".join([f"{h['hobby_name']} (ID: {h['hobby_id']})" for h in all_hobbies]) if all_hobbies else ""
-
     pending_act = execute_query(conn, """
         SELECT suggestion_id, status FROM activity_suggestions 
         WHERE user_id = ? AND status IN ('PROPOSED', 'ACCEPTED') AND DATE(created_at) = ?
@@ -116,21 +172,32 @@ def generate_voice_response(user_id: str, request: VoiceRequest, conn: mariadb.C
     if not history_raw: history_raw = []
     chat_context = "\n".join([f"{m['sender_role']}: {m['message_content']}" for m in reversed(history_raw)])
 
-    # 4. PROMPT GEMINI AGGIORNATO (Tolto il blocco FSM dal prompt, ora è libero)
+    db_state_info = ""
+    if pending_act:
+        db_state_info = f"L'utente HA un'attività in sospeso (Status: {pending_act['status']})."
+    else:
+        db_state_info = "ATTENZIONE: L'utente NON HA attualmente nessuna attività in sospeso."
+
+    # =========================================================================
+    # PROMPT GEMINI: Aggiunta regola "Tolleranza Zero" per il Rifiuto
+    # =========================================================================
     system_prompt = f"""
     Sei Minerva, l'assistente vocale di FlowMate. Parla in modo naturale, breve e incoraggiante.
     
     CONTESTO ATTUALE:
     - {zone_context}
-    - Hobby suggerito stanza: {room_hobby_name or "Nessuno specifico"}.
-    - CATALOGO HOBBY GLOBALE (Devi usare solo questi ID numerici): {catalog_context}
+    - Hobby suggerito dal sistema per questa interazione: {room_hobby_name or "Nessuno specifico"}.
+    - CATALOGO HOBBY PERSONALE DELL'UTENTE (Usa SOLO questi ID): {catalog_context}
     - Obiettivo: {daily_goal} kcal. Bruciate: {kcal_burned_today} kcal. Mancano: {kcal_mancanti} kcal.
-    - Chat: {chat_context}
+    - STATO REALE DEL DATABASE: {db_state_info}
+    - Cronologia Chat: {chat_context}
 
-    REGOLE:
-    1. MASSIMA CONCISIONE: Parla come un compagno di allenamento.
-    2. INSERIMENTO ID: Se decidi di fare una proposta (action="PROPOSE"), DEVI obbligatoriamente inserire in "hobby_id" l'ID numerico corretto letto dal CATALOGO HOBBY.
-
+    REGOLE RIGIDE:
+    1. MASSIMA CONCISIONE: Parla come un compagno di allenamento in 1 o 2 frasi.
+    2. CAPISCI AL VOLO L'ACCETTAZIONE: Se c'è un'attività in sospeso e l'utente usa parole come "accetto", "sì", "va bene", "ok", "facciamolo", DEVI obbligatoriamente restituire action="ACCEPT".
+    3. CAPISCI AL VOLO IL RIFIUTO: Se c'è un'attività in sospeso e l'utente usa parole come "rifiuto", "no", "cambia", "non mi va", DEVI obbligatoriamente restituire action="REJECT".
+    4. STIMA CALORIE E DURATA (FONDAMENTALE): Se proponi un'attività, inserisci SEMPRE nel testo parlato i minuti previsti e le calorie.
+    5. INSERIMENTO ID: Se decidi di fare una proposta (action="PROPOSE"), DEVI inserire in "hobby_id" l'ID numerico letto dal CATALOGO HOBBY PERSONALE.
     RITORNA ESCLUSIVAMENTE QUESTO JSON:
     {{
         "text": "risposta vocale",
@@ -154,11 +221,13 @@ def generate_voice_response(user_id: str, request: VoiceRequest, conn: mariadb.C
     hobby_id = safe_int(ai_data.get("hobby_id"), None)
 
     # =========================================================================
-    # 5. SOVRASCRITTURA DETERMINISTICA (Addio risposte "a caso" di Minerva)
-    # Se Gemini tenta di fare una proposta, lo blocchiamo e imponiamo il testo!
+    # 5. SOVRASCRITTURA DETERMINISTICA E PAUSA FORZATA
     # =========================================================================
     if action == "PROPOSE":
-        if pending_act:
+        if not user_available_hobbies:
+            ai_text = "Pausa forzata! 😅 Hai scartato tutte le tue attività preferite per oggi. Goditi il riposo!"
+            action = None
+        elif pending_act:
             if pending_act['status'] == 'PROPOSED':
                 ai_text = "Hai già una proposta in attesa! Controlla il tablet e dimmi se accetti o rifiuti."
                 action = None
@@ -178,10 +247,15 @@ def generate_voice_response(user_id: str, request: VoiceRequest, conn: mariadb.C
 
     # 6. Esecuzione Azioni Database
     try:
-        if action in ["ACCEPT", "REJECT"] and pending_act:
-            execute_query(conn, f"UPDATE activity_suggestions SET status = '{action}ED' WHERE suggestion_id = ?", 
+        if action == "ACCEPT" and pending_act:
+            execute_query(conn, "UPDATE activity_suggestions SET status = 'ACCEPTED' WHERE suggestion_id = ?", 
                           (pending_act['suggestion_id'],), fetch=False)
-            logging.info(f"Azione {action} eseguita con successo sul DB.")
+            logging.info("Azione ACCEPT eseguita con successo sul DB.")
+            
+        elif action == "REJECT" and pending_act:
+            execute_query(conn, "UPDATE activity_suggestions SET status = 'REJECTED', rejection_reason = 'dislike' WHERE suggestion_id = ?", 
+                          (pending_act['suggestion_id'],), fetch=False)
+            logging.info("Azione REJECT (dislike) eseguita con successo sul DB.")
             
         elif action == "PROPOSE" and hobby_id:
             execute_query(conn, "UPDATE activity_suggestions SET status = 'REJECTED' WHERE user_id = ? AND status IN ('PROPOSED', 'ACCEPTED') AND DATE(created_at) = ?", (user_id, today_str), fetch=False)

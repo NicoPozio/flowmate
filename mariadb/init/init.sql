@@ -165,10 +165,10 @@ proc_exit: BEGIN
 
     IF var_busy_count > 0 THEN SET p_state = 'SILENT_BUSY_SCHEDULE'; LEAVE proc_exit; END IF;
 
-    -- 3. Check COOLDOWN (30 min) (FIX M4: Ignora i rifiuti 'change_activity' per permettere il Reroll)
+    -- 3. Check COOLDOWN (30 min) (Ignora i rifiuti 'change_activity' e 'dislike' per permettere il Reroll)
     SELECT COUNT(*) INTO var_recent_suggestion_count FROM activity_suggestions
     WHERE user_id = p_user_id AND created_at > DATE_SUB(NOW(), INTERVAL 30 MINUTE) AND status != 'COMPLETED'
-    AND (rejection_reason IS NULL OR rejection_reason != 'change_activity');
+    AND (rejection_reason IS NULL OR rejection_reason NOT IN ('change_activity', 'dislike'));
 
     IF var_recent_suggestion_count > 0 THEN SET p_state = 'SILENT_COOLDOWN'; LEAVE proc_exit; END IF;
 
