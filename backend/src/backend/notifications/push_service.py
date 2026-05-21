@@ -44,15 +44,15 @@ def generate_proactive_push_copy(intent: str, hobby_name: str, zone_name: str = 
     - Istruzione: {context_instruction}
     
     REGOLE RIGIDE:
-    1. MASSIMA CONCISIONE: Parla come un compagno di allenamento in UNA SOLA FRASE (max 20-25 parole).
-    2. STIMA CALORIE E DURATA: Nel testo ("body"), inserisci sempre in modo naturale i minuti previsti e le calorie stimate (es. "...facendo 20 min di attività, brucerai circa 150 kcal!").
-    3. Titolo: Accattivante, max 4 parole.
-    4. NO EMOJI: Non usarne mai.
+    1. ULTRA-CONCISIONE (GLANCEABLE): Usa MASSIMO 10-12 parole totali. Il testo non deve mai venire troncato da Android.
+    2. STIMA CALORIE E DURATA: Inserisci sempre i minuti e le kcal stimate in modo super compatto (es. "20 min, ~150 kcal").
+    3. Titolo: Accattivante, max 2-3 parole.
+    4. NO EMOJI: Non usarne mai nel testo.
     
     RITORNA ESCLUSIVAMENTE QUESTO JSON:
     {{
         "title": "Titolo",
-        "body": "Messaggio naturale che nomina l'attività, il tempo e le calorie stimate"
+        "body": "Testo ultra-breve con attività, tempo e kcal"
     }}
     """
 
@@ -65,10 +65,10 @@ def generate_proactive_push_copy(intent: str, hobby_name: str, zone_name: str = 
         return json.loads(response.text)
     except Exception as e:
         logging.error(f"Errore Gemini Push: {e}")
-        # Testo di fallback aggiornato per includere stime standard se non c'è internet
-        fallback_body = f"Sei in {zone_name} da {minutes_in_zone} min. Facciamo {hobby_name} per 20 min (circa 100 kcal)?" if zone_name else f"Che ne dici di {hobby_name} per 20 min, bruciando circa 100 kcal?"
+        # Testo di fallback ultra-corto
+        fallback_body = f"{hobby_name} per 20 min (~100 kcal)?"
         return {
-            "title": "Momento FlowMate", 
+            "title": "Pausa attiva", 
             "body": fallback_body
         }
 
