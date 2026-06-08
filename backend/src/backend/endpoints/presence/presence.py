@@ -102,8 +102,8 @@ def log_presence_entry(
 
             suggestion_id = str(uuid.uuid4())
             execute_query(conn, """
-                UPDATE activity_suggestions 
-                SET status = 'REJECTED' 
+                UPDATE activity_suggestions
+                SET status = 'REJECTED', rejection_reason = 'superseded'
                 WHERE user_id = ? AND status IN ('PROPOSED', 'ACCEPTED') AND DATE(created_at) = CURRENT_DATE()
             """, (user_id,), fetch=False)
 

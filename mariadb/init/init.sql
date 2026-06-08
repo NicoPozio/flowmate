@@ -139,11 +139,11 @@ CREATE TABLE sent_notifications (
 -- ==============================================================================
 -- STORED PROCEDURE: MACCHINA A STATI (FSM) — FIX G + UPGRADE M4
 -- ==============================================================================
+DROP PROCEDURE IF EXISTS EvaluateProactiveState;
 DELIMITER //
-
 CREATE PROCEDURE EvaluateProactiveState(
     IN p_user_id CHAR(36),
-    IN p_beacon_id CHAR(36), -- Aggiunto beacon_id per match con presence.py
+    IN p_beacon_id CHAR(36),
     OUT p_state VARCHAR(50)
 )
 proc_exit: BEGIN
@@ -157,31 +157,34 @@ proc_exit: BEGIN
     SET var_current_time = CURRENT_TIME();
     SET var_current_day = WEEKDAY(CURRENT_DATE());
 
-    -- 1. Check OPT-OUT odierno
+    -- 1. OPT-OUT odierno
     SELECT COUNT(*) INTO var_opt_out_count FROM activity_suggestions
-    WHERE user_id = p_user_id AND status = 'REJECTED' AND rejection_reason = 'today_no' AND DATE(created_at) = CURDATE();
-
+    WHERE user_id = p_user_id AND status = 'REJECTED'
+      AND rejection_reason = 'today_no' AND DATE(created_at) = CURDATE();
     IF var_opt_out_count > 0 THEN SET p_state = 'SILENT_USER_OPTED_OUT'; LEAVE proc_exit; END IF;
 
-    -- 2. Check FASCIA BUSY
+    -- 2. FASCIA BUSY
     SELECT COUNT(*) INTO var_busy_count FROM silent_schedule
-    WHERE user_id = p_user_id AND day_of_week = var_current_day AND event_type = 'Busy' AND var_current_time BETWEEN start_time AND end_time;
-
+    WHERE user_id = p_user_id AND day_of_week = var_current_day
+      AND event_type = 'Busy' AND var_current_time BETWEEN start_time AND end_time;
     IF var_busy_count > 0 THEN SET p_state = 'SILENT_BUSY_SCHEDULE'; LEAVE proc_exit; END IF;
 
-    -- 3. Check COOLDOWN (30 min) (Ignora i rifiuti 'change_activity' e 'dislike' per permettere il Reroll)
+    -- 3. COOLDOWN (30 min): SOLO rifiuti reali, ancorati a rejected_at.
+    --    Non conta le PROPOSED pendenti né i rifiuti di sistema (rejected_at IS NULL),
+    --    ed esclude change_activity / dislike / superseded per consentire il reroll.
     SELECT COUNT(*) INTO var_recent_suggestion_count FROM activity_suggestions
-    WHERE user_id = p_user_id AND created_at > DATE_SUB(NOW(), INTERVAL 30 MINUTE) AND status != 'COMPLETED'
-    AND (rejection_reason IS NULL OR rejection_reason NOT IN ('change_activity', 'dislike'));
-
+    WHERE user_id = p_user_id
+      AND status = 'REJECTED'
+      AND rejected_at IS NOT NULL
+      AND rejected_at > DATE_SUB(NOW(), INTERVAL 30 MINUTE)
+      AND (rejection_reason IS NULL OR rejection_reason NOT IN ('change_activity', 'dislike', 'superseded'));
     IF var_recent_suggestion_count > 0 THEN SET p_state = 'SILENT_COOLDOWN'; LEAVE proc_exit; END IF;
 
-    -- 4. Check ALLOW_NOTIFICATIONS sulla zona specifica
+    -- 4. ALLOW_NOTIFICATIONS sulla zona
     SELECT allow_notifications INTO var_allow_notif FROM beacons_catalog WHERE beacon_id = p_beacon_id;
     IF var_allow_notif = FALSE THEN SET p_state = 'SILENT_ZONE_DISABLED'; LEAVE proc_exit; END IF;
 
-    -- 5. TRIGGER! (Semplificato per la demo)
+    -- 5. TRIGGER
     SET p_state = 'TRIGGER_FITNESS';
 END //
-
 DELIMITER ;

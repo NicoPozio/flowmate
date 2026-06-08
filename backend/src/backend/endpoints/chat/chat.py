@@ -1,9 +1,10 @@
 # =============================================================================
 # [MODIFIED HCI - 2026-05-09]
-# Modifiche apportate:
 #   1. MANTENUTI gli endpoint /suggestions/{id}/accept e /reject
 #   2. [UPGRADE M4] Reroll immediato anti-loop!
 #   3. [HOTFIX 500] Riscritta query con NOT EXISTS per evitare crash MariaDB Connector.
+#   4. [FIX REROLL] /reject ora restituisce la nuova proposta nel body (new_suggestion),
+#      così il client la mostra senza dipendere dal push Firebase.
 # =============================================================================
 
 import os
@@ -27,18 +28,18 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 class RejectRequest(BaseModel):
-    reason: str = "later_30min"  
+    reason: str = "later_30min"
 
 @router.post("/suggestions/{suggestion_id}/accept")
 def accept_suggestion(user_id: str, suggestion_id: str, conn: mariadb.Connection = Depends(db_connection)):
     today_str = date.today().isoformat()
-    
+
     current_logs = execute_query(conn, """
         SELECT SUM(active_minutes) as current_active 
         FROM biometric_logs 
         WHERE user_id = ? AND record_date = ?
     """, (user_id, today_str), fetchone=True, dict=True)
-    
+
     baseline_minutes = current_logs['current_active'] if current_logs and current_logs['current_active'] is not None else 0
 
     execute_query(conn, """
@@ -46,7 +47,7 @@ def accept_suggestion(user_id: str, suggestion_id: str, conn: mariadb.Connection
         SET status = 'ACCEPTED', baseline_active_minutes = ?
         WHERE suggestion_id = ? AND user_id = ?
     """, (baseline_minutes, suggestion_id, user_id), fetch=False)
-    
+
     return {"status": "success", "message": "Attivita' accettata, snapshot registrato."}
 
 @router.post("/suggestions/{suggestion_id}/reject")
@@ -54,7 +55,7 @@ def reject_suggestion(user_id: str, suggestion_id: str, request: RejectRequest, 
     try:
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        sugg = execute_query(conn, "SELECT hobby_id FROM activity_suggestions WHERE suggestion_id = ?", (suggestion_id,), fetchone=True, dict=True)
+        sugg = execute_query(conn, "SELECT hobby_id FROM activity_suggestions WHERE suggestion_id = ? AND user_id = ?", (suggestion_id, user_id), fetchone=True, dict=True)
         rejected_hobby_id = sugg['hobby_id'] if sugg else 0
 
         execute_query(conn, """
@@ -73,6 +74,8 @@ def reject_suggestion(user_id: str, suggestion_id: str, request: RejectRequest, 
         # =========================================================================
         # FIX 500: Reroll immediato usando la logica NOT EXISTS (Anti-Crash)
         # =========================================================================
+        new_suggestion_payload = None  # <-- NUOVO: verrà incluso nella risposta
+
         if request.reason == "change_activity":
             new_hobby = execute_query(conn, """
                 SELECT h.hobby_id, h.hobby_name 
@@ -97,6 +100,15 @@ def reject_suggestion(user_id: str, suggestion_id: str, request: RejectRequest, 
                     VALUES (?, ?, ?, 30, 150, 'PROPOSED')
                 """, (new_suggestion_id, user_id, new_hobby['hobby_id']), fetch=False)
 
+                # NUOVO: payload restituito al client (indipendente dal push)
+                new_suggestion_payload = {
+                    "suggestion_id": new_suggestion_id,
+                    "hobby_id": new_hobby['hobby_id'],
+                    "hobby_name": new_hobby['hobby_name'],
+                    "suggested_duration_minutes": 30,
+                    "expected_kcal": 150
+                }
+
                 background_tasks.add_task(
                     send_shake_notification_task,
                     user_id=user_id,
@@ -113,8 +125,12 @@ def reject_suggestion(user_id: str, suggestion_id: str, request: RejectRequest, 
                     "Hai scartato tutte le tue attività preferite per oggi. Goditi il meritato riposo, non ti disturberò più!"
                 )
 
-        return {"status": "success", "message": f"Attivita' rifiutata. Motivo: {request.reason}"}
-        
+        return {
+            "status": "success",
+            "message": f"Attivita' rifiutata. Motivo: {request.reason}",
+            "new_suggestion": new_suggestion_payload  # None se non c'è reroll
+        }
+
     except Exception as e:
         logging.error(f"Errore 500 in reject_suggestion: {e}")
         raise HTTPException(status_code=500, detail="Errore interno durante il rifiuto dell'attività")
